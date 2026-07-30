@@ -1,0 +1,3 @@
+include:
+  - path: deployments/docker-compose.yml
+    env_file: .env.example

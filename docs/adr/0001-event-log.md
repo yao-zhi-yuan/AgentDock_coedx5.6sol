@@ -11,7 +11,7 @@ Managed Runs must survive controller and worker restarts, expose an audit trail,
 
 An append-only PostgreSQL event log is the authority for Run state. Reconcile loads events, reduces state, decides at most one action, persists intent, executes, and persists the result. Derived Run rows and checkpoints are caches that must be reproducible from events.
 
-External actions use stable IDs and planned/completed/failed events. Artifacts are immutable digest-addressed evidence referenced by events.
+External actions use stable IDs and planned/completed/failed events. Artifacts are digest-addressed evidence referenced by events. Phase 2 guarantees complete bytes and a matching digest at registration; post-registration mutation prevention is not part of this phase and must not be assumed.
 
 ## Consequences
 

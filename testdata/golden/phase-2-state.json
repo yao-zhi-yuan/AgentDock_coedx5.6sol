@@ -1,0 +1,21 @@
+{
+  "exists": true,
+  "run": {
+    "run_id": "run-golden",
+    "scenario_id": "scenario-golden",
+    "spec_hash": "sha256:spec-golden",
+    "desired_state": "Running",
+    "observed_state": "Succeeded",
+    "current_attempt": 1,
+    "version": 9,
+    "created_at": "2026-07-30T01:00:00Z",
+    "updated_at": "2026-07-30T01:00:08Z"
+  },
+  "attempt_id": "run-golden:attempt:1",
+  "reasoning_output": "produce deterministic patch",
+  "tool_name": "phase1.patch",
+  "tool_arguments": "{\"patch\":\"golden\"}",
+  "patch_produced": true,
+  "verification_passed": true,
+  "last_event_type": "RunSucceeded"
+}

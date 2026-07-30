@@ -3,6 +3,8 @@ package store_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"reflect"
 	"sync"
 	"testing"
 
@@ -19,11 +21,11 @@ func TestMemoryStoreDeduplicatesIdempotencyKey(t *testing.T) {
 		IdempotencyKey: "created",
 	}
 
-	first, err := memory.Append(ctx, created)
+	first, err := memory.Append(ctx, 0, created)
 	if err != nil {
 		t.Fatalf("first Append() error = %v", err)
 	}
-	second, err := memory.Append(ctx, created)
+	second, err := memory.Append(ctx, 0, created)
 	if err != nil {
 		t.Fatalf("second Append() error = %v", err)
 	}
@@ -43,6 +45,163 @@ func TestMemoryStoreDeduplicatesIdempotencyKey(t *testing.T) {
 	}
 }
 
+func TestMemoryStoreRejectsStaleExpectedVersion(t *testing.T) {
+	ctx := context.Background()
+	memory := store.NewMemoryEventStore()
+	if _, err := memory.Append(ctx, 0, domain.Event{
+		RunID:          "run-cas",
+		Type:           domain.EventRunCreated,
+		IdempotencyKey: "created",
+		Data:           domain.EventData{ScenarioID: "scenario", SpecHash: "spec"},
+	}); err != nil {
+		t.Fatalf("create Append() error = %v", err)
+	}
+
+	_, err := memory.Append(ctx, 0, domain.Event{
+		RunID:          "run-cas",
+		Type:           domain.EventDesiredStateChanged,
+		IdempotencyKey: "stale-pause",
+		Data:           domain.EventData{DesiredState: domain.DesiredPaused},
+	})
+	if !errors.Is(err, store.ErrVersionConflict) {
+		t.Fatalf("stale Append() error = %v, want version conflict", err)
+	}
+	events, loadErr := memory.Load(ctx, "run-cas")
+	if loadErr != nil {
+		t.Fatalf("Load() error = %v", loadErr)
+	}
+	if len(events) != 1 {
+		t.Fatalf("stale append changed event count to %d", len(events))
+	}
+}
+
+func TestMemoryStoreRejectsCredentialBearingPayload(t *testing.T) {
+	ctx := context.Background()
+	cases := []string{
+		`{"api_key":"do-not-persist"}`,
+		`{"env":{"PATH":"/bin","SERVICE_TOKEN":"do-not-persist"}}`,
+		`{"database":"postgres://user:password@example.invalid/database"}`,
+		"authorization: bearer do-not-persist",
+		"sk-proj-0123456789abcdefghijklmnop",
+		"postgres://user:password@example.invalid/database",
+		"AWS_SECRET_ACCESS_KEY=do-not-persist",
+		"SERVICE_TOKEN=do-not-persist",
+	}
+	for index, payload := range cases {
+		memory := store.NewMemoryEventStore()
+		_, err := memory.Append(ctx, 0, domain.Event{
+			RunID:          fmt.Sprintf("run-secret-%d", index),
+			Type:           domain.EventRunCreated,
+			IdempotencyKey: "created",
+			Data: domain.EventData{
+				ScenarioID: "scenario",
+				SpecHash:   "spec",
+				Output:     payload,
+			},
+		})
+		if !errors.Is(err, store.ErrSensitivePayload) {
+			t.Fatalf("credential payload %q Append() error = %v, want sensitive payload rejection", payload, err)
+		}
+	}
+}
+
+func TestMemoryStoreRejectsNestedCredentialJSONInEveryEventDataStringField(t *testing.T) {
+	ctx := context.Background()
+	dataType := reflect.TypeOf(domain.EventData{})
+	for index := 0; index < dataType.NumField(); index++ {
+		field := dataType.Field(index)
+		if field.Type.Kind() != reflect.String {
+			continue
+		}
+		t.Run(field.Name, func(t *testing.T) {
+			data := domain.EventData{ScenarioID: "scenario", SpecHash: "spec"}
+			reflect.ValueOf(&data).Elem().Field(index).SetString(
+				`{"metadata":[{"OpenAI.Api-Key":"opaque-credential"}]}`,
+			)
+			memory := store.NewMemoryEventStore()
+			_, err := memory.Append(ctx, 0, domain.Event{
+				RunID:          "run-all-string-fields-" + field.Name,
+				Type:           domain.EventRunCreated,
+				IdempotencyKey: "created",
+				Data:           data,
+			})
+			if !errors.Is(err, store.ErrSensitivePayload) {
+				t.Fatalf(
+					"nested credential in EventData.%s Append() error = %v, want sensitive payload rejection",
+					field.Name,
+					err,
+				)
+			}
+
+			normalData := domain.EventData{ScenarioID: "scenario", SpecHash: "spec"}
+			reflect.ValueOf(&normalData).Elem().Field(index).SetString(
+				`{"metadata":[{"message":"ordinary non-credential text"}]}`,
+			)
+			normalMemory := store.NewMemoryEventStore()
+			if _, err := normalMemory.Append(ctx, 0, domain.Event{
+				RunID:          "run-normal-string-field-" + field.Name,
+				Type:           domain.EventRunCreated,
+				IdempotencyKey: "created",
+				Data:           normalData,
+			}); err != nil {
+				t.Fatalf(
+					"normal JSON in EventData.%s Append() error = %v, want success",
+					field.Name,
+					err,
+				)
+			}
+		})
+	}
+}
+
+func TestMemoryStoreCredentialJSONVariantsAndNormalText(t *testing.T) {
+	ctx := context.Background()
+	sensitive := []string{
+		`{"env":{"OPENAI_API_KEY":"sk-proj-abcdefghijklmnop"}}`,
+		`[{"AWS.Secret-Access-Key":"opaque-credential"}]`,
+		`{"SeRvIcE-ToKeN":"opaque-credential"}`,
+		`{"wrapper":"{\"OpenAI.Api-Key\":\"opaque-credential\"}"}`,
+	}
+	for index, reason := range sensitive {
+		memory := store.NewMemoryEventStore()
+		_, err := memory.Append(ctx, 0, domain.Event{
+			RunID:          fmt.Sprintf("run-nested-variant-%d", index),
+			Type:           domain.EventRunCreated,
+			IdempotencyKey: "created",
+			Data: domain.EventData{
+				ScenarioID: "scenario",
+				SpecHash:   "spec",
+				Reason:     reason,
+			},
+		})
+		if !errors.Is(err, store.ErrSensitivePayload) {
+			t.Fatalf("nested credential variant %q error = %v, want rejection", reason, err)
+		}
+	}
+
+	normal := []string{
+		`{"environment_name":"staging","token_count":42,"api_key_rotation":"planned"}`,
+		`[{"message":"explain password rotation without including credentials"}]`,
+		"ordinary reason text with no credential material",
+	}
+	for index, reason := range normal {
+		memory := store.NewMemoryEventStore()
+		_, err := memory.Append(ctx, 0, domain.Event{
+			RunID:          fmt.Sprintf("run-normal-text-%d", index),
+			Type:           domain.EventRunCreated,
+			IdempotencyKey: "created",
+			Data: domain.EventData{
+				ScenarioID: "scenario",
+				SpecHash:   "spec",
+				Reason:     reason,
+			},
+		})
+		if err != nil {
+			t.Fatalf("normal text %q Append() error = %v, want success", reason, err)
+		}
+	}
+}
+
 func TestMemoryStoreRejectsIdempotencyKeyWithDifferentEvent(t *testing.T) {
 	ctx := context.Background()
 	memory := store.NewMemoryEventStore()
@@ -52,13 +211,13 @@ func TestMemoryStoreRejectsIdempotencyKeyWithDifferentEvent(t *testing.T) {
 		IdempotencyKey: "created",
 		Data:           domain.EventData{ScenarioID: "scenario-a", SpecHash: "spec-a"},
 	}
-	if _, err := memory.Append(ctx, first); err != nil {
+	if _, err := memory.Append(ctx, 0, first); err != nil {
 		t.Fatalf("first Append() error = %v", err)
 	}
 
 	conflict := first
 	conflict.Data.ScenarioID = "scenario-b"
-	_, err := memory.Append(ctx, conflict)
+	_, err := memory.Append(ctx, 0, conflict)
 	if !errors.Is(err, store.ErrIdempotencyConflict) {
 		t.Fatalf("conflicting Append() error = %v, want idempotency conflict", err)
 	}
@@ -75,7 +234,7 @@ func TestMemoryStoreRejectsIdempotencyKeyWithDifferentEvent(t *testing.T) {
 func TestMemoryStoreRejectsInvalidTransitionWithoutPersistingIt(t *testing.T) {
 	ctx := context.Background()
 	memory := store.NewMemoryEventStore()
-	_, err := memory.Append(ctx, domain.Event{
+	_, err := memory.Append(ctx, 0, domain.Event{
 		RunID:          "run-001",
 		Type:           domain.EventAttemptStarted,
 		IdempotencyKey: "attempt",
@@ -106,7 +265,7 @@ func TestMemoryStoreConcurrentDuplicateOnlyAppendsOnce(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			result, err := memory.Append(ctx, domain.Event{
+			result, err := memory.Append(ctx, 0, domain.Event{
 				RunID:          "run-race",
 				Type:           domain.EventRunCreated,
 				IdempotencyKey: "created",
@@ -159,7 +318,7 @@ func TestMemoryStoreConcurrentConflictingCreateOnlyOneWins(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, err := memory.Append(ctx, event)
+			_, err := memory.Append(ctx, 0, event)
 			errorsCh <- err
 		}()
 	}

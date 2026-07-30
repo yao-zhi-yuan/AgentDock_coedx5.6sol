@@ -65,6 +65,77 @@ func Reduce(events []Event) (State, error) {
 	return state, nil
 }
 
+// ReduceFromCheckpoint applies a suffix to a previously validated projection.
+// Persistent stores must verify that the checkpoint matches the authoritative
+// event prefix and enforce full-log idempotency uniqueness before calling it.
+func ReduceFromCheckpoint(checkpoint State, events []Event) (State, error) {
+	if !checkpoint.Exists || checkpoint.Run.ID == "" || checkpoint.Run.Version == 0 {
+		return State{}, fmt.Errorf("%w: checkpoint must contain an existing versioned Run", ErrInvalidEvent)
+	}
+	state := checkpoint
+	idempotencyKeys := make(map[string]struct{}, len(events))
+	for index, event := range events {
+		expectedSeq := checkpoint.Run.Version + uint64(index) + 1
+		if event.Seq != expectedSeq {
+			return State{}, fmt.Errorf(
+				"%w: checkpoint suffix index %d has seq %d, want %d",
+				ErrInvalidSequence,
+				index,
+				event.Seq,
+				expectedSeq,
+			)
+		}
+		if event.RunID != state.Run.ID {
+			return State{}, fmt.Errorf(
+				"%w: checkpoint suffix seq %d run_id %q differs from %q",
+				ErrInvalidEvent,
+				event.Seq,
+				event.RunID,
+				state.Run.ID,
+			)
+		}
+		if event.IdempotencyKey == "" {
+			return State{}, fmt.Errorf("%w: event seq %d has empty idempotency_key", ErrInvalidEvent, event.Seq)
+		}
+		if event.PayloadVersion != CurrentEventPayloadVersion {
+			return State{}, fmt.Errorf(
+				"%w: event seq %d has payload_version %d, want %d",
+				ErrInvalidEvent,
+				event.Seq,
+				event.PayloadVersion,
+				CurrentEventPayloadVersion,
+			)
+		}
+		if _, duplicate := idempotencyKeys[event.IdempotencyKey]; duplicate {
+			return State{}, fmt.Errorf(
+				"%w: %q at seq %d",
+				ErrDuplicateIdempotencyKey,
+				event.IdempotencyKey,
+				event.Seq,
+			)
+		}
+		idempotencyKeys[event.IdempotencyKey] = struct{}{}
+		if state.Run.ObservedState.Terminal() {
+			return State{}, fmt.Errorf(
+				"%w: %s before %s at seq %d",
+				ErrTerminalState,
+				state.Run.ObservedState,
+				event.Type,
+				event.Seq,
+			)
+		}
+		if err := applyEvent(&state, event); err != nil {
+			return State{}, fmt.Errorf("reduce %s at seq %d: %w", event.Type, event.Seq, err)
+		}
+		state.Run.Version = event.Seq
+		if event.CreatedAt != "" {
+			state.Run.UpdatedAt = event.CreatedAt
+		}
+		state.LastEventType = event.Type
+	}
+	return state, nil
+}
+
 func applyEvent(state *State, event Event) error {
 	switch event.Type {
 	case EventRunCreated:

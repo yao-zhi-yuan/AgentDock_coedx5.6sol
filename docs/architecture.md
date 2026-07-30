@@ -10,7 +10,7 @@ Prepare → Reason → Act → Verify → Repair → Verify → Complete
 
 The project differentiates itself through durable state, crash recovery, concurrency control, isolated execution, deterministic verification, replay, and evidence—not through a general workflow engine.
 
-This contract was frozen in phase 0. Phase 1 now implements the domain reducer/decider, framework-neutral Reasoner seam and FakeReasoner, in-memory Event Store, single-process Reconcile path, and minimal CLI. Other components shown below remain planned for their assigned phases.
+This contract was frozen in phase 0. Phase 2 implements the domain reducer/decider, framework-neutral Reasoner seam and FakeReasoner, compatible memory and PostgreSQL Event Stores, transactional Run-version CAS, verified checkpoints, Artifact registration, one Reconcile path, and a PostgreSQL-backed restartable CLI. Other components shown below remain planned for their assigned phases.
 
 ## Request-to-artifact path
 
@@ -44,7 +44,7 @@ The end-to-end path is:
 5. The worker appends `ActionPlanned` with a stable `action_id` before an external action.
 6. In phase 1, `FakeReasoner` returns the minimum framework-neutral result needed to complete a deterministic Run, including the minimal internal tool-call variant required by Gate 1's invalid-tool-call test. From phase 5, `EinoReasoner` and `ReplayReasoner` normalize provider/recorded streaming, tool-call, usage, finish, and error data into that internal contract; Eino-specific types stay inside the Eino adapter.
 7. A declared tool is checked against its contract and static policy, then executed in the disposable Docker worktree.
-8. The result and receipt are persisted, and any patch becomes a content-addressed artifact.
+8. The result and receipt are persisted, and any patch is complete and digest-addressed when its Artifact metadata is registered.
 9. Deterministic verifiers bind evidence to `run_id`, `attempt_id`, `workspace_digest`, `spec_hash`, and verifier version.
 10. Only verifier evidence permits the controller to append a terminal success event.
 
@@ -54,7 +54,7 @@ The end-to-end path is:
 |---|---|---|
 | CLI | user commands and rendering | workflow truth |
 | Controller | desired/observed lifecycle and reconcile decisions | model-internal state |
-| PostgreSQL store | ordered events, run version, leases, metadata | artifact bytes |
+| PostgreSQL store | ordered events, transactional run version, attempts, checkpoint cache, artifact metadata | artifact bytes or phase-3 lease behavior |
 | Worker | leased action execution | permanent authority |
 | Reasoner seam | framework-neutral request/result contract used by Controller | Eino/provider types and run lifecycle |
 | FakeReasoner | deterministic phase 1 reasoning for the pure state-machine demo | live models, Eino, streaming, replay |
@@ -63,7 +63,7 @@ The end-to-end path is:
 | Tool/policy layer | schemas, capabilities, paths, network and budgets | arbitrary host shell |
 | Sandbox | disposable worktree and constrained process execution | strong tenant isolation |
 | Verifier | deterministic pass/fail evidence | accepting an agent's self-report |
-| Artifact store | immutable evidence bytes and digests | deciding success |
+| Artifact store | complete-at-registration evidence bytes and digest metadata | deciding success or preventing later file/metadata mutation in phase 2 |
 | Replay | state reconstruction and recorded dependency playback | silently ignoring divergence |
 
 ## Eino boundary
@@ -88,11 +88,13 @@ Load events
 → Renew or release lease
 ```
 
-The same path runs after a clean start, a process restart, lease takeover, and recovery from an incomplete action. Process memory is a cache only.
+Phase 2 runs this same path after a clean start or process restart. PostgreSQL events are the authority; Run columns and checkpoints are reproducible caches, and a corrupt checkpoint falls back to full-log reduction. Lease takeover and incomplete external-action recovery remain phase 3. Process memory is a cache only.
 
-## Leases and fencing
+## Leases and fencing (phase 3)
 
-A lease grants temporary scheduling ownership; it cannot revoke a process that is paused or partitioned. Every acquisition increments the Run's fencing token in PostgreSQL. Each lease-sensitive append and receipt carries that token. The store rejects a token lower than the current token, so an old worker cannot resume writing after a new worker takes over.
+The phase 2 migration creates the frozen `leases` table only. It does not register Workers, acquire or renew leases, issue fencing tokens, take over work, or reject stale Workers. Those behaviors begin in phase 3.
+
+The planned rule is that a lease grants temporary scheduling ownership; it cannot revoke a process that is paused or partitioned. Every acquisition increments the Run's fencing token in PostgreSQL. Each lease-sensitive append and receipt carries that token. The store then rejects a token lower than the current token.
 
 ## Crash windows
 

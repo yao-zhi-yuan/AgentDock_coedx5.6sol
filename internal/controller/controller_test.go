@@ -532,7 +532,11 @@ func (blocking *blockingVerificationStore) Load(ctx context.Context, runID strin
 	return blocking.inner.Load(ctx, runID)
 }
 
-func (blocking *blockingVerificationStore) Append(ctx context.Context, event domain.Event) (store.AppendResult, error) {
+func (blocking *blockingVerificationStore) Append(
+	ctx context.Context,
+	expectedVersion uint64,
+	event domain.Event,
+) (store.AppendResult, error) {
 	if event.Type == domain.EventVerificationPassed {
 		blocking.once.Do(func() { close(blocking.entered) })
 		select {
@@ -541,7 +545,11 @@ func (blocking *blockingVerificationStore) Append(ctx context.Context, event dom
 			return store.AppendResult{}, ctx.Err()
 		}
 	}
-	return blocking.inner.Append(ctx, event)
+	return blocking.inner.Append(ctx, expectedVersion, event)
+}
+
+func (blocking *blockingVerificationStore) Rebuild(ctx context.Context, runID string) (domain.State, error) {
+	return blocking.inner.Rebuild(ctx, runID)
 }
 
 type backgroundReconcileResult struct {

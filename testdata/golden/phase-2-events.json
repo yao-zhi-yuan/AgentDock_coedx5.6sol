@@ -1,0 +1,116 @@
+[
+  {
+    "run_id": "run-golden",
+    "seq": 1,
+    "event_type": "RunCreated",
+    "payload_version": 1,
+    "payload": {
+      "scenario_id": "scenario-golden",
+      "spec_hash": "sha256:spec-golden"
+    },
+    "idempotency_key": "run-created",
+    "correlation_id": "run-golden",
+    "created_at": "2026-07-30T01:00:00Z"
+  },
+  {
+    "run_id": "run-golden",
+    "seq": 2,
+    "event_type": "AttemptStarted",
+    "payload_version": 1,
+    "payload": {
+      "attempt_id": "run-golden:attempt:1",
+      "action_id": "action-start",
+      "reason": "initial"
+    },
+    "idempotency_key": "action-start:attempt-started",
+    "correlation_id": "run-golden",
+    "created_at": "2026-07-30T01:00:01Z"
+  },
+  {
+    "run_id": "run-golden",
+    "seq": 3,
+    "event_type": "WorkspaceProvisioned",
+    "payload_version": 1,
+    "payload": {
+      "action_id": "action-provision"
+    },
+    "idempotency_key": "action-provision:workspace-provisioned",
+    "correlation_id": "run-golden",
+    "created_at": "2026-07-30T01:00:02Z"
+  },
+  {
+    "run_id": "run-golden",
+    "seq": 4,
+    "event_type": "ReasoningPlanned",
+    "payload_version": 1,
+    "payload": {
+      "action_id": "action-reason"
+    },
+    "idempotency_key": "action-reason:reasoning-planned",
+    "correlation_id": "run-golden",
+    "created_at": "2026-07-30T01:00:03Z"
+  },
+  {
+    "run_id": "run-golden",
+    "seq": 5,
+    "event_type": "ReasoningCompleted",
+    "payload_version": 1,
+    "payload": {
+      "action_id": "action-reason",
+      "output": "produce deterministic patch",
+      "tool_name": "phase1.patch",
+      "tool_arguments": "{\"patch\":\"golden\"}"
+    },
+    "idempotency_key": "action-reason:reasoning-completed",
+    "correlation_id": "run-golden",
+    "created_at": "2026-07-30T01:00:04Z"
+  },
+  {
+    "run_id": "run-golden",
+    "seq": 6,
+    "event_type": "PatchProduced",
+    "payload_version": 1,
+    "payload": {
+      "action_id": "action-patch"
+    },
+    "idempotency_key": "action-patch:patch-produced",
+    "correlation_id": "run-golden",
+    "created_at": "2026-07-30T01:00:05Z"
+  },
+  {
+    "run_id": "run-golden",
+    "seq": 7,
+    "event_type": "VerificationPlanned",
+    "payload_version": 1,
+    "payload": {
+      "action_id": "action-verify"
+    },
+    "idempotency_key": "action-verify:verification-planned",
+    "correlation_id": "run-golden",
+    "created_at": "2026-07-30T01:00:06Z"
+  },
+  {
+    "run_id": "run-golden",
+    "seq": 8,
+    "event_type": "VerificationPassed",
+    "payload_version": 1,
+    "payload": {
+      "action_id": "action-verify"
+    },
+    "idempotency_key": "action-verify:verification-passed",
+    "correlation_id": "run-golden",
+    "created_at": "2026-07-30T01:00:07Z"
+  },
+  {
+    "run_id": "run-golden",
+    "seq": 9,
+    "event_type": "RunSucceeded",
+    "payload_version": 1,
+    "payload": {
+      "action_id": "action-succeed"
+    },
+    "idempotency_key": "action-succeed:run-succeeded",
+    "correlation_id": "run-golden",
+    "created_at": "2026-07-30T01:00:08Z"
+  }
+]

@@ -16,5 +16,5 @@ reasoner:
   adapter: replay
 
 telemetry:
-  otlpEndpoint: http://localhost:4318
+  otlpEndpoint: http://localhost:14318
   serviceName: agentdock-verify

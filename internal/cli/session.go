@@ -12,9 +12,9 @@ import (
 func newSessionCommand(runtime *controller.Controller) *cobra.Command {
 	return &cobra.Command{
 		Use:   "session",
-		Short: "Run newline-delimited CLI commands in one in-memory process",
-		Long: "Run newline-delimited CLI commands in one in-memory process.\n" +
-			"Arguments are whitespace-delimited; quoted values are not supported in phase 1.",
+		Short: "Run newline-delimited CLI commands in one process",
+		Long: "Run newline-delimited CLI commands in one process.\n" +
+			"Arguments are whitespace-delimited; quoted values are not supported.",
 		Args: cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
 			scanner := bufio.NewScanner(command.InOrStdin())

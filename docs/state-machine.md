@@ -1,6 +1,6 @@
 # Run state machine
 
-This contract was frozen in phase 0. Phase 1 implements its active success, Pause/Resume, Cancel, and controlled-failure subset in `internal/domain` and `internal/controller`; repair and approval transitions remain assigned to later phases.
+This contract was frozen in phase 0. Phase 2 preserves phase 1's active success, Pause/Resume, Cancel, and controlled-failure semantics while persisting the same event sequence behind the same Controller path. Repair and approval transitions remain assigned to later phases.
 
 ## State dimensions
 
@@ -71,7 +71,7 @@ Phase 1 distinguishes starting work from recording the result of work that alrea
 - Resume continues with `ApplyPatch`, `SucceedRun`, or `FailRun` as derived from the persisted result. It does not execute the completed Reasoner or verification action again.
 - `ToolCallFailed` and `RunFailed` are separate appends. If execution stops after the first, the next active Reconcile deterministically emits stable `FailRun` and converges to `RunFailed`.
 
-These are single-process logical concurrency semantics. Phase 1 has no process crash recovery, CAS, lease, or fencing; those remain assigned to phases 2 and 3.
+These result-after-Pause rules now survive process restart through PostgreSQL. Phase 2 adds Run-version CAS and restart recovery; lease and fencing semantics remain assigned to phase 3.
 
 ## Repair and approval
 
@@ -89,4 +89,4 @@ Repair is bounded to three rounds. A verifier failure with remaining budget sche
 - Replaying the same valid event sequence produces byte-for-byte equivalent state fields.
 - Time, randomness, network, and process memory are not reducer inputs.
 
-Phase 1 makes the reducer/decider, transition ownership, deterministic replay, Pause/Resume/Cancel, stable action ID, terminal-state, malformed-event, and in-memory idempotency invariants executable. Lease/fencing, current verifier evidence, recovery, repair, and approval invariants remain assigned to their planned later phases.
+Phase 2 additionally makes PostgreSQL ordering, version CAS, idempotency, transaction rollback, checkpoint fallback, and process-restart reconstruction executable. Lease/fencing, current verifier evidence, external-action recovery, repair, and approval invariants remain assigned to their planned later phases.

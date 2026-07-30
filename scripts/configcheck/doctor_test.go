@@ -14,7 +14,7 @@ func TestDoctorAcceptsValidEnvironment(t *testing.T) {
 	if result.err != nil {
 		t.Fatalf("doctor failed: %v\n%s", result.err, result.output)
 	}
-	if !strings.Contains(result.output, "configured local ports 5432, 4317, 4318, 16686 are valid, distinct, and free") {
+	if !strings.Contains(result.output, "configured local ports 55433, 14317, 14318, 16687 are valid, distinct, and available to this Compose project") {
 		t.Fatalf("doctor did not report configured port checks:\n%s", result.output)
 	}
 }
@@ -27,24 +27,75 @@ func TestDoctorRejectsMissingRequiredParameter(t *testing.T) {
 }
 
 func TestDoctorRejectsInvalidPort(t *testing.T) {
-	envFile := strings.Replace(readExampleEnv(t), "POSTGRES_PORT=5432", "POSTGRES_PORT=not-a-port", 1)
+	envFile := strings.Replace(readExampleEnv(t), "POSTGRES_PORT=55433", "POSTGRES_PORT=not-a-port", 1)
 	result := runDoctor(t, envFile, nil)
 
 	requireDoctorFailure(t, result, "invalid POSTGRES_PORT")
 }
 
 func TestDoctorRejectsDuplicatePorts(t *testing.T) {
-	envFile := strings.Replace(readExampleEnv(t), "OTEL_GRPC_PORT=4317", "OTEL_GRPC_PORT=5432", 1)
+	envFile := strings.Replace(readExampleEnv(t), "OTEL_GRPC_PORT=14317", "OTEL_GRPC_PORT=55433", 1)
 	result := runDoctor(t, envFile, nil)
 
-	requireDoctorFailure(t, result, "duplicate host port 5432")
+	requireDoctorFailure(t, result, "duplicate host port 55433")
 }
 
 func TestDoctorChecksConfiguredPortForConflict(t *testing.T) {
-	envFile := strings.Replace(readExampleEnv(t), "POSTGRES_PORT=5432", "POSTGRES_PORT=15432", 1)
+	envFile := strings.Replace(readExampleEnv(t), "POSTGRES_PORT=55433", "POSTGRES_PORT=15432", 1)
 	result := runDoctor(t, envFile, map[string]string{"FAKE_BUSY_PORT": "15432"})
 
 	requireDoctorFailure(t, result, "POSTGRES_PORT requires local port 15432")
+}
+
+func TestDoctorAcceptsBusyPostgresPortOwnedByComposeService(t *testing.T) {
+	envFile := strings.Replace(readExampleEnv(t), "POSTGRES_PORT=55433", "POSTGRES_PORT=15432", 1)
+	result := runDoctor(t, envFile, map[string]string{
+		"FAKE_BUSY_PORT":             "15432",
+		"FAKE_COMPOSE_POSTGRES_PORT": "15432",
+	})
+
+	if result.err != nil {
+		t.Fatalf("doctor rejected the Compose-owned PostgreSQL port: %v\n%s", result.err, result.output)
+	}
+}
+
+func TestDoctorRejectsBusyPortPublishedByDifferentComposePort(t *testing.T) {
+	envFile := strings.Replace(readExampleEnv(t), "POSTGRES_PORT=55433", "POSTGRES_PORT=15432", 1)
+	result := runDoctor(t, envFile, map[string]string{
+		"FAKE_BUSY_PORT":             "15432",
+		"FAKE_COMPOSE_POSTGRES_PORT": "25432",
+	})
+
+	requireDoctorFailure(t, result, "POSTGRES_PORT requires local port 15432")
+}
+
+func TestDoctorAcceptsAllBusyPortsOwnedByExpectedComposeServices(t *testing.T) {
+	envFile := readExampleEnv(t)
+	envFile = strings.Replace(envFile, "POSTGRES_PORT=55433", "POSTGRES_PORT=15432", 1)
+	envFile = strings.Replace(envFile, "OTEL_GRPC_PORT=14317", "OTEL_GRPC_PORT=24317", 1)
+	envFile = strings.Replace(envFile, "OTEL_HTTP_PORT=14318", "OTEL_HTTP_PORT=24318", 1)
+	envFile = strings.Replace(envFile, "JAEGER_UI_PORT=16687", "JAEGER_UI_PORT=26686", 1)
+	result := runDoctor(t, envFile, map[string]string{
+		"FAKE_BUSY_PORTS":             "15432 24317 24318 26686",
+		"FAKE_COMPOSE_POSTGRES_PORT":  "15432",
+		"FAKE_COMPOSE_OTEL_GRPC_PORT": "24317",
+		"FAKE_COMPOSE_OTEL_HTTP_PORT": "24318",
+		"FAKE_COMPOSE_JAEGER_UI_PORT": "26686",
+	})
+
+	if result.err != nil {
+		t.Fatalf("doctor rejected ports owned by the expected Compose services: %v\n%s", result.err, result.output)
+	}
+}
+
+func TestDoctorRejectsBusyTelemetryPortOwnedElsewhere(t *testing.T) {
+	envFile := strings.Replace(readExampleEnv(t), "OTEL_GRPC_PORT=14317", "OTEL_GRPC_PORT=24317", 1)
+	result := runDoctor(t, envFile, map[string]string{
+		"FAKE_BUSY_PORTS":             "24317",
+		"FAKE_COMPOSE_OTEL_GRPC_PORT": "34317",
+	})
+
+	requireDoctorFailure(t, result, "OTEL_GRPC_PORT requires local port 24317")
 }
 
 func TestDoctorRejectsWrongGoToolchain(t *testing.T) {
@@ -161,16 +212,60 @@ if [ "$1" = "compose" ] && [ "$2" = "version" ]; then
 	exit "${FAKE_COMPOSE_VERSION_FAIL:-0}"
 fi
 if [ "$1" = "compose" ]; then
+	case "$*" in
+		*" ps --status running --services")
+			if [ -n "${FAKE_COMPOSE_POSTGRES_PORT:-}" ]; then
+				printf 'postgres\n'
+			fi
+			if [ -n "${FAKE_COMPOSE_OTEL_GRPC_PORT:-}${FAKE_COMPOSE_OTEL_HTTP_PORT:-}" ]; then
+				printf 'otel-collector\n'
+			fi
+			if [ -n "${FAKE_COMPOSE_JAEGER_UI_PORT:-}" ]; then
+				printf 'jaeger\n'
+			fi
+			exit 0
+			;;
+		*" port postgres 5432")
+			if [ -n "${FAKE_COMPOSE_POSTGRES_PORT:-}" ]; then
+				printf '127.0.0.1:%s\n' "$FAKE_COMPOSE_POSTGRES_PORT"
+				exit 0
+			fi
+			exit 1
+			;;
+		*" port otel-collector 4317")
+			if [ -n "${FAKE_COMPOSE_OTEL_GRPC_PORT:-}" ]; then
+				printf '127.0.0.1:%s\n' "$FAKE_COMPOSE_OTEL_GRPC_PORT"
+				exit 0
+			fi
+			exit 1
+			;;
+		*" port otel-collector 4318")
+			if [ -n "${FAKE_COMPOSE_OTEL_HTTP_PORT:-}" ]; then
+				printf '127.0.0.1:%s\n' "$FAKE_COMPOSE_OTEL_HTTP_PORT"
+				exit 0
+			fi
+			exit 1
+			;;
+		*" port jaeger 16686")
+			if [ -n "${FAKE_COMPOSE_JAEGER_UI_PORT:-}" ]; then
+				printf '127.0.0.1:%s\n' "$FAKE_COMPOSE_JAEGER_UI_PORT"
+				exit 0
+			fi
+			exit 1
+			;;
+	esac
 	exit "${FAKE_COMPOSE_CONFIG_FAIL:-0}"
 fi
 exit 1
 `
 
 const fakeLsof = `#!/bin/sh
-case "$*" in
-	*":${FAKE_BUSY_PORT:-never} "*)
-		exit 0
-		;;
-esac
+for port in ${FAKE_BUSY_PORTS:-${FAKE_BUSY_PORT:-never}}; do
+	case "$*" in
+		*":${port} "*)
+			exit 0
+			;;
+	esac
+done
 exit 1
 `

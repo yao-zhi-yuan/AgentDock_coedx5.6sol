@@ -17,7 +17,25 @@ func main() {
 }
 
 func run(args []string, input io.Reader, output, errorOutput io.Writer) int {
-	runtime := controller.New(store.NewMemoryEventStore(), reasoner.NewFakeReasoner())
+	eventStore := store.EventStore(store.NewMemoryEventStore())
+	closeStore := func() {}
+	databaseURL := os.Getenv("AGENTDOCK_DATABASE_URL")
+	if databaseURL == "" && len(args) > 0 && args[0] == "run" {
+		fmt.Fprintln(errorOutput, "AGENTDOCK_DATABASE_URL is required for durable run commands")
+		return 1
+	}
+	if databaseURL != "" && (len(args) == 0 || args[0] != "demo-fake") {
+		postgres, err := store.NewPostgresEventStore(context.Background(), databaseURL)
+		if err != nil {
+			fmt.Fprintln(errorOutput, err)
+			return 1
+		}
+		eventStore = postgres
+		closeStore = postgres.Close
+	}
+	defer closeStore()
+
+	runtime := controller.New(eventStore, reasoner.NewFakeReasoner())
 	root := cli.NewRootCommand(runtime)
 	root.SetArgs(args)
 	root.SetIn(input)

@@ -56,6 +56,24 @@ port_is_listening() {
 	fail "neither lsof nor nc is available for port checks"
 }
 
+compose_service_owns_port() {
+	service=$1
+	container_port=$2
+	expected_host_port=$3
+	docker compose --env-file "$env_file" -f "$compose_file" \
+		ps --status running --services 2>/dev/null |
+		grep -qx "$service" ||
+		return 1
+	published=$(
+		docker compose --env-file "$env_file" -f "$compose_file" \
+			port "$service" "$container_port" 2>/dev/null
+	) ||
+		return 1
+	[ -n "$published" ] || return 1
+	published_port=${published##*:}
+	[ "$published_port" = "$expected_host_port" ]
+}
+
 require_command go
 actual_go=$(go env GOVERSION)
 [ "$actual_go" = "$expected_go" ] || fail "selected Go toolchain is $actual_go; expected $expected_go"
@@ -100,10 +118,31 @@ do
 	checked_ports="$checked_ports $port"
 	checked_port_list="${checked_port_list}${checked_port_list:+, }$port"
 	if port_is_listening "$port"; then
+		case "$key" in
+			POSTGRES_PORT)
+				compose_service=postgres
+				container_port=5432
+				;;
+			OTEL_GRPC_PORT)
+				compose_service=otel-collector
+				container_port=4317
+				;;
+			OTEL_HTTP_PORT)
+				compose_service=otel-collector
+				container_port=4318
+				;;
+			JAEGER_UI_PORT)
+				compose_service=jaeger
+				container_port=16686
+				;;
+		esac
+		if compose_service_owns_port "$compose_service" "$container_port" "$port"; then
+			continue
+		fi
 		fail "$key requires local port $port, which is already in use"
 	fi
 done
-pass "configured local ports $checked_port_list are valid, distinct, and free"
+pass "configured local ports $checked_port_list are valid, distinct, and available to this Compose project"
 
 go run ./scripts/configcheck \
 	configs/agentdock.yaml \

@@ -10,12 +10,12 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// NewRootCommand builds the minimal phase-1 CLI around an injected in-memory
-// runtime. Injection keeps command behavior testable in one process.
+// NewRootCommand builds the CLI around an injected Controller. The same
+// command path works with the memory and PostgreSQL stores.
 func NewRootCommand(runtime *controller.Controller) *cobra.Command {
 	root := &cobra.Command{
 		Use:           "agentdock",
-		Short:         "AgentDock Verify phase-1 runtime",
+		Short:         "AgentDock Verify durable runtime",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
@@ -24,10 +24,11 @@ func NewRootCommand(runtime *controller.Controller) *cobra.Command {
 }
 
 func newRunCommand(runtime *controller.Controller) *cobra.Command {
-	run := &cobra.Command{Use: "run", Short: "Manage in-memory Runs"}
+	run := &cobra.Command{Use: "run", Short: "Manage Runs"}
 	run.AddCommand(
 		newCreateCommand(runtime),
 		newGetCommand(runtime),
+		newEventsCommand(runtime),
 		newStepCommand(runtime),
 		newDesiredCommand(runtime, "pause", domain.DesiredPaused),
 		newDesiredCommand(runtime, "resume", domain.DesiredRunning),
@@ -36,12 +37,27 @@ func newRunCommand(runtime *controller.Controller) *cobra.Command {
 	return run
 }
 
+func newEventsCommand(runtime *controller.Controller) *cobra.Command {
+	return &cobra.Command{
+		Use:   "events RUN_ID",
+		Short: "Display the authoritative ordered Event Log",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(command *cobra.Command, args []string) error {
+			events, err := runtime.Events(command.Context(), args[0])
+			if err != nil {
+				return err
+			}
+			return writeJSON(command.OutOrStdout(), events)
+		},
+	}
+}
+
 func newCreateCommand(runtime *controller.Controller) *cobra.Command {
 	var scenarioID string
 	var specHash string
 	command := &cobra.Command{
 		Use:   "create RUN_ID",
-		Short: "Create an in-memory Run",
+		Short: "Create a Run",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(command *cobra.Command, args []string) error {
 			state, err := runtime.CreateRun(command.Context(), controller.CreateRunRequest{

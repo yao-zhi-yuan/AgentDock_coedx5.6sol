@@ -2,7 +2,7 @@
 
 ## Authority
 
-The PostgreSQL event log will be the authoritative record for a Run. Derived Run rows and checkpoints accelerate reads but do not replace ordered events. A process restart must be able to discard all in-memory state and rebuild from durable data.
+The PostgreSQL event log is the authoritative record for a Run in phase 2. Derived Run rows and checkpoints are disposable caches that do not replace ordered events. Phase 2 verifies a checkpoint by re-reducing its event prefix and therefore makes no checkpoint read-acceleration claim. A process restart can discard all in-memory state and rebuild from durable data; an inconsistent checkpoint falls back to complete Event Log reduction.
 
 ## Event envelope
 
@@ -19,7 +19,7 @@ Every event will carry:
 - `fencing_token` for lease-sensitive writes;
 - database-assigned `created_at`.
 
-The append transaction will enforce uniqueness on `(run_id, seq)` and `(run_id, idempotency_key)` and compare the expected Run version. Payloads must not contain model keys, database passwords, complete environments, or unredacted sensitive prompts.
+The append transaction enforces uniqueness on `(run_id, seq)` and `(run_id, idempotency_key)`, compares the expected Run version, validates the candidate state, inserts the event, and advances the Run projection in one transaction. PostgreSQL assigns the timestamp. Payloads containing credential-shaped keys, environment containers, credential URLs, or common secret markers are rejected before persistence.
 
 ## Minimum event vocabulary
 
@@ -50,7 +50,7 @@ RunFailed
 RunCancelled
 ```
 
-Phase 1 implements a narrow, versioned `EventData` payload for its deterministic success, Pause/Resume/Cancel, and controlled reasoner-failure paths. PostgreSQL schemas, migrations, and payloads owned by later phases remain deferred.
+Phase 2 persists the narrow, versioned `EventData` payload used by deterministic success, Pause/Resume/Cancel, and controlled reasoner-failure paths. Later-phase payload semantics remain deferred.
 
 ## Intent, execution, and result
 
@@ -75,9 +75,9 @@ In phase 1, Pause rejects a new planned fact but does not reject the matching re
 - **After execution, before completion append:** search by `action_id` and validate the external receipt before retrying.
 - **After completion append:** completion is authoritative and the action must not run again.
 
-## Lease takeover
+## Lease takeover (phase 3)
 
-Lease expiry permits a new worker to acquire a larger fencing token. It does not stop the old process. PostgreSQL rejects lease-sensitive writes with the stale token, including delayed action results. The new worker reconciles the planned action and any receipt through the normal path.
+The phase 2 schema includes `leases`, but no lease operation or fencing check is implemented. In phase 3, lease expiry will permit a new worker to acquire a larger fencing token without assuming the old process stopped; delayed stale writes will then be rejected.
 
 ## Event Replay versus Execution Replay
 
@@ -89,7 +89,7 @@ A divergence is evidence to investigate, not a reason to mutate the source event
 
 ## Artifact relationship
 
-Large output, patches, verifier logs, cassettes, and trace evidence live outside event payloads. Events reference immutable artifacts by ID and digest. An artifact is registered only after bytes are complete, size-limited, and hashed. Verification evidence binds to:
+Large output, patches, verifier logs, cassettes, and trace evidence live outside event payloads. Phase 2 writes Artifact bytes to a temporary file, hashes and syncs them, closes and atomically renames the complete file, and only then registers metadata with database time. The digest records the bytes present at registration. Phase 2 does not make the file read-only, reject later Artifact metadata updates/deletes, or otherwise provide a strong post-registration immutability guarantee; consumers that need later integrity must re-hash the bytes. Events can reference an Artifact by ID and digest. Verification evidence later binds to:
 
 ```text
 run_id

@@ -2,7 +2,7 @@
 
 AgentDock Verify is a managed runtime for Eino-based coding agents that is designed to make execution recoverable, sandboxed, deterministic to verify, and replayable.
 
-The five-week MVP is an engineering demonstration, not a claim of production-scale multi-tenancy or a strong security boundary. The repository is currently at **phase 1: deterministic domain model and single-process runtime**. It has a pure reducer/decider, program-owned transitions, a framework-neutral `Reasoner` seam with `FakeReasoner`, an in-memory event store, a single-process Reconcile path, and a minimal CLI. PostgreSQL, workers, sandboxing, real Eino integration, verifiers, repair, replay, and telemetry remain unimplemented.
+The five-week MVP is an engineering demonstration, not a claim of production-scale multi-tenancy or a strong security boundary. The repository is currently at **phase 2: durable PostgreSQL Event Store and reconciliation**. It has a pure reducer/decider, program-owned transitions, a framework-neutral `Reasoner` seam with `FakeReasoner`, compatible memory and PostgreSQL Event Stores, transactional version CAS, verified checkpoints, digest-addressed Artifact registration, one Reconcile path, and a durable CLI. Worker registration, lease behavior and fencing, sandboxing, real Eino integration, verifiers, repair, replay, and telemetry remain unimplemented.
 
 The project contract and sole construction plan is [`AgentDock-Verify-施工计划.md`](AgentDock-Verify-施工计划.md). The frozen five-week scope is restated in [`docs/scope.md`](docs/scope.md).
 
@@ -23,52 +23,54 @@ flowchart LR
     V --> F["Evidence artifacts"]
 ```
 
-Phase 1 defines a minimal framework-neutral Reasoner seam and `FakeReasoner`; Controller depends only on that seam. Phase 5 adds `EinoReasoner`, `ReplayReasoner`, and streaming/tool/usage/finish/error normalization behind it, while revalidating Fake compatibility. Eino types never cross into Controller. AgentDock owns lifecycle, persistence, leases and fencing, sandbox policy, verification, artifacts, fault injection, telemetry, and replay.
+Phase 1 defined the minimal framework-neutral Reasoner seam and `FakeReasoner`; Controller depends only on that seam. Phase 2 makes PostgreSQL events the authority without changing that Controller path. Phase 5 adds `EinoReasoner`, `ReplayReasoner`, and streaming/tool/usage/finish/error normalization behind it, while revalidating Fake compatibility. Eino types never cross into Controller. AgentDock owns lifecycle, persistence, and the later lease/fencing, sandbox policy, verification, fault injection, telemetry, and replay layers.
 
-## Phase 1 check
+## Phase 2 check
 
 Prerequisites:
 
 - a Go installation capable of automatic toolchain selection;
 - Docker with a running daemon;
 - Docker Compose;
-- local ports `5432`, `4317`, `4318`, and `16686` available.
+- local ports `55433`, `14317`, `14318`, and `16687` available (or already owned by this Compose project).
 
 Run:
 
 ```bash
 make doctor
+docker compose up -d postgres
+make migrate
 go mod verify
 make test
 make test-race
 make lint
+make test-integration
+make test-rebuild-state
 make demo-fake
 git diff --check
 ```
 
-`make demo-fake` prints the successful event sequence and a Pause/Resume recovery path. `make doctor` still validates the pinned Go toolchain, Docker daemon, Compose, ports, required example parameters, YAML syntax, and the Compose model. It neither starts services nor writes a real `.env`.
+`make demo-fake` keeps the fast memory-backed deterministic path. `make test-integration` exercises PostgreSQL transaction rollback, version competition, idempotency, reconnect, checkpoints, Artifacts, migration atomicity, and fresh-process Controller recovery. `make doctor` validates the pinned Go toolchain, Docker daemon, Compose, configured ports, required example parameters, YAML syntax, and the Compose model. A busy configured port is accepted only when the expected service in this Compose project publishes that exact host/container-port mapping.
 
-The sample values in `.env.example` are local-only defaults, not production credentials. Live model credentials are not required in phase 1 and will never be a default CI dependency.
+The sample values in `.env.example` are local-only defaults, not production credentials. Live model credentials are not required in phase 2 and will never be a default CI dependency.
 
-## Phase 1 CLI
+## Durable CLI
 
-The Event Store is intentionally memory-only in this phase. Use `session` to keep one process alive while exercising the required `run` commands:
+Set `AGENTDOCK_DATABASE_URL` to select PostgreSQL. Every standalone invocation then creates a fresh process and reconstructs the Run from the same authoritative Event Log:
 
-```text
-go run ./cmd/agentdock session
-run create demo-cli --scenario phase-1 --spec-hash phase-1-spec
-run get demo-cli
-run step demo-cli
-run pause demo-cli
-run resume demo-cli
-run cancel demo-cli
+```bash
+export AGENTDOCK_DATABASE_URL='postgres://agentdock:agentdock_dev_only@127.0.0.1:55433/agentdock?sslmode=disable'
+go run ./cmd/agentdock run create demo-cli --scenario phase-2 --spec-hash phase-2-spec
+go run ./cmd/agentdock run step demo-cli
+go run ./cmd/agentdock run get demo-cli
+go run ./cmd/agentdock run events demo-cli
 ```
 
-End the session with EOF (`Ctrl-D`). Each line uses whitespace-delimited arguments; quoted values are not supported in the phase 1 session. Standalone CLI invocations intentionally start with an empty in-memory Store. Cross-process durability begins in phase 2 with PostgreSQL rather than a temporary file-backed substitute.
+Standalone `run` commands reject a missing `AGENTDOCK_DATABASE_URL`; they never silently create an authoritative memory-only Run. The compatible memory Store remains available through dependency injection, the explicit `session` compatibility command, and `demo-fake`. Checkpoints are disposable verified snapshots: Rebuild compares their projection with the authoritative event prefix, and a missing or inconsistent checkpoint falls back to complete Event Log reduction.
 
 ## Consistency and security claims
 
-The planned execution model is at-least-once with idempotent scoped actions and fencing tokens. It will not be described as exactly-once.
+This phase does not claim exactly-once. PostgreSQL makes event append and Run version update atomic, while external actions still cannot share that transaction. Lease and fencing behavior begins only in phase 3.
 
 Docker reduces accidental and common hostile access, but a container shares the host kernel and is not a strong multi-tenant isolation boundary. The MVP must run untrusted code only on a dedicated development machine or disposable runner appropriate for the risk.
 

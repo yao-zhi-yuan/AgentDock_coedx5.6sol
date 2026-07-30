@@ -15,7 +15,7 @@ var (
 	ErrRunExists      = errors.New("run already exists")
 )
 
-// Controller owns desired-state changes and single-process reconciliation.
+// Controller owns desired-state changes and one deterministic Reconcile path.
 type Controller struct {
 	store    store.EventStore
 	reasoner reasoner.Reasoner
@@ -38,7 +38,7 @@ type ReconcileResult struct {
 	State   domain.State
 }
 
-// New constructs a phase-1 controller.
+// New constructs a Controller over either compatible Event Store.
 func New(eventStore store.EventStore, runReasoner reasoner.Reasoner) *Controller {
 	return &Controller{store: eventStore, reasoner: runReasoner}
 }
@@ -54,7 +54,7 @@ func (controller *Controller) CreateRun(ctx context.Context, request CreateRunRe
 		return domain.State{}, err
 	}
 
-	_, err := controller.store.Append(ctx, domain.Event{
+	_, err := controller.store.Append(ctx, 0, domain.Event{
 		RunID:          request.RunID,
 		Type:           domain.EventRunCreated,
 		Data:           domain.EventData{ScenarioID: request.ScenarioID, SpecHash: request.SpecHash},
@@ -70,11 +70,7 @@ func (controller *Controller) CreateRun(ctx context.Context, request CreateRunRe
 
 // GetRun rebuilds state exclusively from stored events.
 func (controller *Controller) GetRun(ctx context.Context, runID string) (domain.State, error) {
-	events, err := controller.store.Load(ctx, runID)
-	if err != nil {
-		return domain.State{}, err
-	}
-	state, err := domain.Reduce(events)
+	state, err := controller.store.Rebuild(ctx, runID)
 	if err != nil {
 		return domain.State{}, fmt.Errorf("reduce run %s: %w", runID, err)
 	}
@@ -104,7 +100,7 @@ func (controller *Controller) SetDesiredState(ctx context.Context, runID string,
 	}
 
 	key := fmt.Sprintf("desired:%s:v%d", desired, state.Run.Version)
-	_, err = controller.store.Append(ctx, domain.Event{
+	_, err = controller.store.Append(ctx, state.Run.Version, domain.Event{
 		RunID:          runID,
 		Type:           domain.EventDesiredStateChanged,
 		Data:           domain.EventData{DesiredState: desired},
@@ -117,8 +113,8 @@ func (controller *Controller) SetDesiredState(ctx context.Context, runID string,
 	return controller.GetRun(ctx, runID)
 }
 
-// Reconcile loads, reduces, decides one command, and persists its phase-1
-// intent/result facts through the same path.
+// Reconcile rebuilds, decides one command, and persists its current
+// intent/result facts through the same path after a clean start or restart.
 func (controller *Controller) Reconcile(ctx context.Context, runID string) (ReconcileResult, error) {
 	state, err := controller.GetRun(ctx, runID)
 	if err != nil {
@@ -130,15 +126,31 @@ func (controller *Controller) Reconcile(ctx context.Context, runID string) (Reco
 		return result, nil
 	}
 
+	expectedVersion := state.Run.Version
 	appendEvent := func(event domain.Event) error {
 		event.RunID = runID
 		event.CorrelationID = runID
-		appendResult, appendErr := controller.store.Append(ctx, event)
+		appendResult, appendErr := controller.store.Append(ctx, expectedVersion, event)
+		if errors.Is(appendErr, store.ErrVersionConflict) {
+			current, loadErr := controller.GetRun(ctx, runID)
+			if loadErr != nil {
+				return loadErr
+			}
+			expectedVersion = current.Run.Version
+			appendResult, appendErr = controller.store.Append(ctx, expectedVersion, event)
+		}
 		if appendErr != nil {
 			return appendErr
 		}
 		if appendResult.Appended {
 			result.Events = append(result.Events, appendResult.Event)
+			expectedVersion = appendResult.Event.Seq
+		} else {
+			current, loadErr := controller.GetRun(ctx, runID)
+			if loadErr != nil {
+				return loadErr
+			}
+			expectedVersion = current.Run.Version
 		}
 		return nil
 	}

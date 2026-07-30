@@ -30,6 +30,12 @@ func TestRunCommandsShareInjectedInMemoryRuntime(t *testing.T) {
 		!strings.Contains(output, `"observed_state": "Provisioning"`) {
 		t.Fatalf("step output = %s", output)
 	}
+	output = execute(t, runtime, "run", "events", "run-cli")
+	if !strings.Contains(output, `"seq": 1`) ||
+		!strings.Contains(output, `"seq": 2`) ||
+		!strings.Contains(output, `"event_type": "AttemptStarted"`) {
+		t.Fatalf("events output = %s", output)
+	}
 
 	output = execute(t, runtime, "run", "pause", "run-cli")
 	if !strings.Contains(output, `"observed_state": "Paused"`) {
