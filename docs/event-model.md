@@ -50,7 +50,7 @@ RunFailed
 RunCancelled
 ```
 
-Payload schemas and migrations are deferred to their planned implementation phases.
+Phase 1 implements a narrow, versioned `EventData` payload for its deterministic success, Pause/Resume/Cancel, and controlled reasoner-failure paths. PostgreSQL schemas, migrations, and payloads owned by later phases remain deferred.
 
 ## Intent, execution, and result
 
@@ -64,6 +64,8 @@ ActionPlanned(action_id, input_digest, fencing_token)
 ```
 
 Planning and result appends are durable facts. The external action is not part of the database transaction, which is why execution is at-least-once.
+
+In phase 1, Pause rejects a new planned fact but does not reject the matching result of an already planned Reasoning or Verification action. The reducer validates the pending `action_id`, records the result while observed state remains `Paused`, and updates the saved resume path or evidence. `ToolCallFailed` is itself a durable result prefix; `RunFailed` is emitted by the next active `FailRun` decision, so an interruption between those two appends converges without calling the Reasoner again.
 
 ## Crash interpretation
 

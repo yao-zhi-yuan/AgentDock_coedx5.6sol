@@ -1,8 +1,24 @@
-# Demo placeholder
+# Demo
 
-The five-minute product demo is a phase 8 deliverable and is intentionally not implemented during phase 0.
+Phase 1 provides a deterministic framework-free demonstration:
 
-The frozen eventual sequence is:
+```bash
+make demo-fake
+```
+
+It prints the event log for a successful FakeReasoner Run, including:
+
+```text
+RunCreated
+AttemptStarted
+ReasoningCompleted
+VerificationPassed
+RunSucceeded
+```
+
+It then pauses a second Run in `Provisioning`, executes ten no-op Reconcile cycles, resumes to `Provisioning`, and converges to `Succeeded`.
+
+The five-minute product demo remains a phase 8 deliverable. Its frozen eventual sequence is:
 
 1. problem and architecture;
 2. create a Run;
@@ -14,4 +30,4 @@ The frozen eventual sequence is:
 8. replay without a live model;
 9. state trade-offs and limitations.
 
-This file reserves the target repository path only. It is not evidence that any demo or runtime behavior exists.
+The phase 1 command is evidence only for the pure state machine and in-memory FakeReasoner runtime. It does not demonstrate PostgreSQL recovery, leases/fencing, Docker isolation, Eino, real verifiers, repair, fault injection, OTel, or replay.

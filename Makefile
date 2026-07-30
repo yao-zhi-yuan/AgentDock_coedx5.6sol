@@ -13,9 +13,13 @@ DOCTOR_ENV := .env.example
 	chaos-worker-kill test-rebuild-state e2e-recorded e2e-replay e2e-live
 
 help:
-	@echo "AgentDock Verify — phase 0 repository skeleton"
-	@echo "  make doctor          Validate the phase 0 development environment"
+	@echo "AgentDock Verify — phase 1 deterministic runtime"
+	@echo "  make doctor          Validate the development environment"
 	@echo "  make compose-config  Parse the pinned Docker Compose configuration"
+	@echo "  make lint            Run Go static analysis"
+	@echo "  make test            Run all Go tests"
+	@echo "  make test-race       Run all Go tests with the race detector"
+	@echo "  make demo-fake       Demonstrate a fake Run and pause/resume"
 	@echo "  Other targets are intentionally unavailable until their planned phase"
 
 doctor:
@@ -25,13 +29,13 @@ compose-config:
 	@docker compose --env-file "$(DOCTOR_ENV)" -f "$(COMPOSE_FILE)" config --quiet
 
 lint:
-	@./scripts/not-implemented.sh "lint" "phase 1"
+	@go vet ./...
 
 test:
-	@./scripts/not-implemented.sh "test" "phase 1"
+	@go test ./...
 
 test-race:
-	@./scripts/not-implemented.sh "test-race" "phase 1"
+	@go test -race ./...
 
 test-integration:
 	@./scripts/not-implemented.sh "test-integration" "phase 2"
@@ -46,7 +50,7 @@ migrate:
 	@./scripts/not-implemented.sh "migrate" "phase 2"
 
 demo-fake:
-	@./scripts/not-implemented.sh "demo-fake" "phase 1"
+	@go run ./cmd/agentdock demo-fake
 
 demo-eino-recorded:
 	@./scripts/not-implemented.sh "demo-eino-recorded" "phase 5"

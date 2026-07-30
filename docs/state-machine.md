@@ -1,6 +1,6 @@
 # Run state machine
 
-This phase 0 document freezes state names, ownership, transitions, and invariants. It does not implement the reducer or controller.
+This contract was frozen in phase 0. Phase 1 implements its active success, Pause/Resume, Cancel, and controlled-failure subset in `internal/domain` and `internal/controller`; repair and approval transitions remain assigned to later phases.
 
 ## State dimensions
 
@@ -56,9 +56,22 @@ Models and tools emit normalized results; they do not write a state. State is de
 ## Pause, resume, and cancel
 
 - Pause changes desired state and prevents Reconcile from planning a new external action.
-- An already-running action is cancelled when its contract permits cancellation; its eventual result remains auditable.
+- Pause does not erase a durable planned action. Its matching completion or failure result remains auditable even if Pause wins the race before the result append.
 - Resume does not jump to a hard-coded state. It reloads events and resumes the same reconciliation path.
 - Cancel persists intent first, stops planning work, attempts bounded cleanup, and converges to `Cancelled`.
+
+### Phase 1 planned-result concurrency
+
+Phase 1 distinguishes starting work from recording the result of work that already has a matching `action_id`:
+
+- `ReasoningPlanned` and `VerificationPlanned` are rejected after Pause, so Pause prevents new work.
+- A matching `ReasoningCompleted`, `ToolCallFailed`, or `VerificationPassed` is accepted after Pause because the work was already planned.
+- `ReasoningCompleted` advances the saved resume target from `Reasoning` to `Acting`; `VerificationPassed` records evidence while keeping the resume target at `Verifying`; `ToolCallFailed` records the durable failure prefix.
+- While desired state remains Paused, `Decide` returns `Noop` even after one of those results.
+- Resume continues with `ApplyPatch`, `SucceedRun`, or `FailRun` as derived from the persisted result. It does not execute the completed Reasoner or verification action again.
+- `ToolCallFailed` and `RunFailed` are separate appends. If execution stops after the first, the next active Reconcile deterministically emits stable `FailRun` and converges to `RunFailed`.
+
+These are single-process logical concurrency semantics. Phase 1 has no process crash recovery, CAS, lease, or fencing; those remain assigned to phases 2 and 3.
 
 ## Repair and approval
 
@@ -76,4 +89,4 @@ Repair is bounded to three rounds. A verifier failure with remaining budget sche
 - Replaying the same valid event sequence produces byte-for-byte equivalent state fields.
 - Time, randomness, network, and process memory are not reducer inputs.
 
-These invariants become executable acceptance tests in later phases; they are not claimed as implemented in phase 0.
+Phase 1 makes the reducer/decider, transition ownership, deterministic replay, Pause/Resume/Cancel, stable action ID, terminal-state, malformed-event, and in-memory idempotency invariants executable. Lease/fencing, current verifier evidence, recovery, repair, and approval invariants remain assigned to their planned later phases.

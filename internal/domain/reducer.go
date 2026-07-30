@@ -1,0 +1,423 @@
+package domain
+
+import (
+	"errors"
+	"fmt"
+)
+
+var (
+	ErrInvalidSequence         = errors.New("invalid event sequence")
+	ErrDuplicateIdempotencyKey = errors.New("duplicate idempotency key")
+	ErrInvalidTransition       = errors.New("invalid state transition")
+	ErrTerminalState           = errors.New("terminal state cannot advance")
+	ErrUnsupportedEvent        = errors.New("unsupported event in phase 1")
+	ErrInvalidEvent            = errors.New("invalid event")
+)
+
+// Reduce validates and projects an ordered event log. Its result depends only
+// on the supplied event values.
+func Reduce(events []Event) (State, error) {
+	state := InitialState()
+	idempotencyKeys := make(map[string]struct{}, len(events))
+
+	for index, event := range events {
+		expectedSeq := uint64(index + 1)
+		if event.Seq != expectedSeq {
+			return State{}, fmt.Errorf("%w: event index %d has seq %d, want %d", ErrInvalidSequence, index, event.Seq, expectedSeq)
+		}
+		if event.RunID == "" {
+			return State{}, fmt.Errorf("%w: event seq %d has empty run_id", ErrInvalidEvent, event.Seq)
+		}
+		if event.IdempotencyKey == "" {
+			return State{}, fmt.Errorf("%w: event seq %d has empty idempotency_key", ErrInvalidEvent, event.Seq)
+		}
+		if event.PayloadVersion != CurrentEventPayloadVersion {
+			return State{}, fmt.Errorf(
+				"%w: event seq %d has payload_version %d, want %d",
+				ErrInvalidEvent,
+				event.Seq,
+				event.PayloadVersion,
+				CurrentEventPayloadVersion,
+			)
+		}
+		if _, duplicate := idempotencyKeys[event.IdempotencyKey]; duplicate {
+			return State{}, fmt.Errorf("%w: %q at seq %d", ErrDuplicateIdempotencyKey, event.IdempotencyKey, event.Seq)
+		}
+		idempotencyKeys[event.IdempotencyKey] = struct{}{}
+
+		if state.Exists && event.RunID != state.Run.ID {
+			return State{}, fmt.Errorf("%w: event seq %d run_id %q differs from %q", ErrInvalidEvent, event.Seq, event.RunID, state.Run.ID)
+		}
+		if state.Exists && state.Run.ObservedState.Terminal() {
+			return State{}, fmt.Errorf("%w: %s before %s at seq %d", ErrTerminalState, state.Run.ObservedState, event.Type, event.Seq)
+		}
+
+		if err := applyEvent(&state, event); err != nil {
+			return State{}, fmt.Errorf("reduce %s at seq %d: %w", event.Type, event.Seq, err)
+		}
+		state.Run.Version = event.Seq
+		if event.CreatedAt != "" {
+			state.Run.UpdatedAt = event.CreatedAt
+		}
+		state.LastEventType = event.Type
+	}
+
+	return state, nil
+}
+
+func applyEvent(state *State, event Event) error {
+	switch event.Type {
+	case EventRunCreated:
+		if state.Exists {
+			return fmt.Errorf("%w: RunCreated requires an empty state", ErrInvalidTransition)
+		}
+		if err := ValidateTransition("", StatusQueued); err != nil {
+			return err
+		}
+		*state = State{
+			Exists: true,
+			Run: Run{
+				ID:            event.RunID,
+				ScenarioID:    event.Data.ScenarioID,
+				SpecHash:      event.Data.SpecHash,
+				DesiredState:  DesiredRunning,
+				ObservedState: StatusQueued,
+				CreatedAt:     event.CreatedAt,
+			},
+		}
+		return nil
+
+	case EventDesiredStateChanged:
+		if !state.Exists {
+			return fmt.Errorf("%w: desired state requires RunCreated", ErrInvalidTransition)
+		}
+		return applyDesiredState(state, event.Data.DesiredState)
+
+	case EventAttemptStarted:
+		if err := requireActiveState(state, StatusQueued); err != nil {
+			return err
+		}
+		if event.Data.AttemptID == "" {
+			return fmt.Errorf("%w: AttemptStarted requires attempt_id", ErrInvalidEvent)
+		}
+		if err := transition(state, StatusProvisioning); err != nil {
+			return err
+		}
+		state.Run.CurrentAttempt++
+		state.AttemptID = event.Data.AttemptID
+		return nil
+
+	case EventWorkspaceProvisioned:
+		if err := requireActiveState(state, StatusProvisioning); err != nil {
+			return err
+		}
+		return transition(state, StatusReasoning)
+
+	case EventReasoningPlanned:
+		if err := requireActiveState(state, StatusReasoning); err != nil {
+			return err
+		}
+		if event.Data.ActionID == "" {
+			return fmt.Errorf("%w: ReasoningPlanned requires action_id", ErrInvalidEvent)
+		}
+		if state.PendingActionID != "" {
+			return fmt.Errorf("%w: reasoning action %q already pending", ErrInvalidTransition, state.PendingActionID)
+		}
+		state.PendingActionID = event.Data.ActionID
+		return nil
+
+	case EventReasoningCompleted:
+		paused, err := requirePlannedResultState(state, StatusReasoning)
+		if err != nil {
+			return err
+		}
+		if err := requirePendingAction(state, event.Data.ActionID); err != nil {
+			return err
+		}
+		if event.Data.ToolName == "" {
+			return fmt.Errorf("%w: ReasoningCompleted requires tool_name", ErrInvalidEvent)
+		}
+		if err := advancePlannedResult(state, paused, StatusActing); err != nil {
+			return err
+		}
+		state.PendingActionID = ""
+		state.ReasoningOutput = event.Data.Output
+		state.ToolName = event.Data.ToolName
+		state.ToolArguments = event.Data.ToolArguments
+		return nil
+
+	case EventToolCallFailed:
+		if _, err := requirePlannedResultState(state, StatusReasoning); err != nil {
+			return err
+		}
+		if err := requirePendingAction(state, event.Data.ActionID); err != nil {
+			return err
+		}
+		if event.Data.Reason == "" {
+			return fmt.Errorf("%w: ToolCallFailed requires reason", ErrInvalidEvent)
+		}
+		state.PendingActionID = ""
+		state.FailureReason = event.Data.Reason
+		return nil
+
+	case EventPatchProduced:
+		if err := requireActiveState(state, StatusActing); err != nil {
+			return err
+		}
+		if event.Data.ActionID == "" {
+			return fmt.Errorf("%w: PatchProduced requires action_id", ErrInvalidEvent)
+		}
+		if err := transition(state, StatusVerifying); err != nil {
+			return err
+		}
+		state.PatchProduced = true
+		return nil
+
+	case EventVerificationPlanned:
+		if err := requireActiveState(state, StatusVerifying); err != nil {
+			return err
+		}
+		if state.VerificationPassed {
+			return fmt.Errorf("%w: verification already passed", ErrInvalidTransition)
+		}
+		if event.Data.ActionID == "" {
+			return fmt.Errorf("%w: VerificationPlanned requires action_id", ErrInvalidEvent)
+		}
+		if state.PendingActionID != "" {
+			return fmt.Errorf("%w: action %q already pending", ErrInvalidTransition, state.PendingActionID)
+		}
+		state.PendingActionID = event.Data.ActionID
+		return nil
+
+	case EventVerificationPassed:
+		if _, err := requirePlannedResultState(state, StatusVerifying); err != nil {
+			return err
+		}
+		if err := requirePendingAction(state, event.Data.ActionID); err != nil {
+			return err
+		}
+		state.PendingActionID = ""
+		state.VerificationPassed = true
+		return nil
+
+	case EventRunSucceeded:
+		if err := requireActiveState(state, StatusVerifying); err != nil {
+			return err
+		}
+		if !state.VerificationPassed || state.PendingActionID != "" {
+			return fmt.Errorf("%w: success requires completed verification evidence", ErrInvalidTransition)
+		}
+		return transition(state, StatusSucceeded)
+
+	case EventRunFailed:
+		if !state.Exists {
+			return fmt.Errorf("%w: RunFailed requires RunCreated", ErrInvalidTransition)
+		}
+		if state.Run.DesiredState != DesiredRunning {
+			return fmt.Errorf("%w: RunFailed requires Running desired state", ErrInvalidTransition)
+		}
+		if event.Data.Reason != "" {
+			state.FailureReason = event.Data.Reason
+		}
+		if state.FailureReason == "" {
+			return fmt.Errorf("%w: RunFailed requires a failure reason", ErrInvalidEvent)
+		}
+		state.PendingActionID = ""
+		return transition(state, StatusFailed)
+
+	case EventRunCancelled:
+		if !state.Exists || state.Run.DesiredState != DesiredCancelled {
+			return fmt.Errorf("%w: RunCancelled requires cancelled intent", ErrInvalidTransition)
+		}
+		state.PendingActionID = ""
+		return transition(state, StatusCancelled)
+
+	default:
+		return fmt.Errorf("%w: %s", ErrUnsupportedEvent, event.Type)
+	}
+}
+
+func applyDesiredState(state *State, desired DesiredState) error {
+	if !desired.Valid() {
+		return fmt.Errorf("%w: unknown desired state %q", ErrInvalidEvent, desired)
+	}
+	if state.Run.ObservedState.Terminal() {
+		return fmt.Errorf("%w: %s", ErrTerminalState, state.Run.ObservedState)
+	}
+
+	switch desired {
+	case DesiredPaused:
+		if state.Run.DesiredState == DesiredPaused || state.Run.ObservedState == StatusPaused {
+			return fmt.Errorf("%w: Run is already paused", ErrInvalidTransition)
+		}
+		if state.Run.DesiredState == DesiredCancelled {
+			return fmt.Errorf("%w: cancelled intent cannot be replaced by pause", ErrInvalidTransition)
+		}
+		state.ResumeState = state.Run.ObservedState
+		if err := transition(state, StatusPaused); err != nil {
+			return err
+		}
+		state.Run.DesiredState = DesiredPaused
+		return nil
+
+	case DesiredRunning:
+		if state.Run.DesiredState != DesiredPaused ||
+			state.Run.ObservedState != StatusPaused ||
+			state.ResumeState == "" {
+			return fmt.Errorf("%w: resume requires a paused Run", ErrInvalidTransition)
+		}
+		resumeState := state.ResumeState
+		if err := transition(state, resumeState); err != nil {
+			return err
+		}
+		state.ResumeState = ""
+		state.Run.DesiredState = DesiredRunning
+		return nil
+
+	case DesiredCancelled:
+		if state.Run.DesiredState == DesiredCancelled {
+			return fmt.Errorf("%w: Run already has cancelled intent", ErrInvalidTransition)
+		}
+		state.Run.DesiredState = DesiredCancelled
+		return nil
+	}
+
+	return fmt.Errorf("%w: unknown desired state %q", ErrInvalidEvent, desired)
+}
+
+func requireActiveState(state *State, expected Status) error {
+	if !state.Exists {
+		return fmt.Errorf("%w: %s requires RunCreated", ErrInvalidTransition, expected)
+	}
+	if state.Run.DesiredState != DesiredRunning || state.Run.ObservedState != expected {
+		return fmt.Errorf(
+			"%w: requires desired=%s observed=%s, got desired=%s observed=%s",
+			ErrInvalidTransition,
+			DesiredRunning,
+			expected,
+			state.Run.DesiredState,
+			state.Run.ObservedState,
+		)
+	}
+	return nil
+}
+
+func requirePlannedResultState(state *State, expected Status) (bool, error) {
+	if !state.Exists {
+		return false, fmt.Errorf("%w: %s result requires RunCreated", ErrInvalidTransition, expected)
+	}
+	if state.Run.DesiredState == DesiredRunning && state.Run.ObservedState == expected {
+		return false, nil
+	}
+	if state.Run.DesiredState == DesiredPaused &&
+		state.Run.ObservedState == StatusPaused &&
+		state.ResumeState == expected {
+		return true, nil
+	}
+	return false, fmt.Errorf(
+		"%w: result requires active %s or Paused with resume=%s, got desired=%s observed=%s resume=%s",
+		ErrInvalidTransition,
+		expected,
+		expected,
+		state.Run.DesiredState,
+		state.Run.ObservedState,
+		state.ResumeState,
+	)
+}
+
+func advancePlannedResult(state *State, paused bool, next Status) error {
+	if !paused {
+		return transition(state, next)
+	}
+	if err := ValidateTransition(state.ResumeState, next); err != nil {
+		return err
+	}
+	state.ResumeState = next
+	return nil
+}
+
+func requirePendingAction(state *State, actionID string) error {
+	if actionID == "" || state.PendingActionID == "" || actionID != state.PendingActionID {
+		return fmt.Errorf("%w: action_id %q does not match pending action %q", ErrInvalidTransition, actionID, state.PendingActionID)
+	}
+	return nil
+}
+
+func transition(state *State, next Status) error {
+	if err := ValidateTransition(state.Run.ObservedState, next); err != nil {
+		return err
+	}
+	state.Run.ObservedState = next
+	return nil
+}
+
+// ValidateTransition is the program-owned transition guard. Models and
+// reasoners never provide a target state.
+func ValidateTransition(from, to Status) error {
+	if from.Terminal() {
+		return fmt.Errorf("%w: %w: %s -> %s", ErrTerminalState, ErrInvalidTransition, from, to)
+	}
+
+	allowed := map[Status]map[Status]struct{}{
+		"": {
+			StatusQueued: {},
+		},
+		StatusQueued: {
+			StatusProvisioning: {},
+			StatusPaused:       {},
+			StatusCancelled:    {},
+		},
+		StatusProvisioning: {
+			StatusReasoning: {},
+			StatusPaused:    {},
+			StatusFailed:    {},
+			StatusCancelled: {},
+		},
+		StatusReasoning: {
+			StatusActing:    {},
+			StatusPaused:    {},
+			StatusFailed:    {},
+			StatusCancelled: {},
+		},
+		StatusActing: {
+			StatusVerifying: {},
+			StatusPaused:    {},
+			StatusFailed:    {},
+			StatusCancelled: {},
+		},
+		StatusVerifying: {
+			StatusSucceeded: {},
+			StatusRepairing: {},
+			StatusPaused:    {},
+			StatusFailed:    {},
+			StatusCancelled: {},
+		},
+		StatusRepairing: {
+			StatusReasoning:       {},
+			StatusWaitingApproval: {},
+			StatusPaused:          {},
+			StatusFailed:          {},
+			StatusCancelled:       {},
+		},
+		StatusWaitingApproval: {
+			StatusReasoning: {},
+			StatusFailed:    {},
+			StatusCancelled: {},
+		},
+		StatusPaused: {
+			StatusQueued:          {},
+			StatusProvisioning:    {},
+			StatusReasoning:       {},
+			StatusActing:          {},
+			StatusVerifying:       {},
+			StatusRepairing:       {},
+			StatusWaitingApproval: {},
+			StatusCancelled:       {},
+		},
+	}
+
+	if _, ok := allowed[from][to]; !ok {
+		return fmt.Errorf("%w: %s -> %s", ErrInvalidTransition, from, to)
+	}
+	return nil
+}

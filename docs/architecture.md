@@ -10,7 +10,7 @@ Prepare → Reason → Act → Verify → Repair → Verify → Complete
 
 The project differentiates itself through durable state, crash recovery, concurrency control, isolated execution, deterministic verification, replay, and evidence—not through a general workflow engine.
 
-This document is a phase 0 contract. Components shown below are planned unless explicitly described as repository tooling.
+This contract was frozen in phase 0. Phase 1 now implements the domain reducer/decider, framework-neutral Reasoner seam and FakeReasoner, in-memory Event Store, single-process Reconcile path, and minimal CLI. Other components shown below remain planned for their assigned phases.
 
 ## Request-to-artifact path
 
