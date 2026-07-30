@@ -1,0 +1,20 @@
+apiVersion: agentdock.dev/v1alpha1
+kind: RuntimeConfig
+
+runtime:
+  mode: recorded
+  maxRepairRounds: 3
+  runTimeout: 10m
+
+database:
+  dsnEnv: AGENTDOCK_DATABASE_URL
+
+artifacts:
+  rootDirEnv: AGENTDOCK_ARTIFACT_DIR
+
+reasoner:
+  adapter: replay
+
+telemetry:
+  otlpEndpoint: http://localhost:4318
+  serviceName: agentdock-verify

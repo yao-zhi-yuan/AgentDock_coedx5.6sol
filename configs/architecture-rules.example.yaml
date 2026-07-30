@@ -1,0 +1,10 @@
+apiVersion: agentdock.dev/v1alpha1
+kind: ArchitectureRuleSet
+
+metadata:
+  name: layered-go-service
+
+rules:
+  - from: internal/handler
+    denyImports:
+      - internal/repository

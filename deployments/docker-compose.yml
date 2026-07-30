@@ -1,0 +1,40 @@
+name: agentdock-verify
+
+services:
+  postgres:
+    image: postgres:18.4-alpine@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  jaeger:
+    image: jaegertracing/jaeger:2.18.0@sha256:d2cbd047e44b50c11454820f84fd5f34c24a435e5301cf94fe026bf055db80b3
+    ports:
+      - "127.0.0.1:${JAEGER_UI_PORT}:16686"
+
+  otel-collector:
+    image: ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector:0.157.0@sha256:4019ce4d7e7791a1a255fffb2f407af66d5017cc65543469ba565c4f47f795b8
+    command:
+      - --config=/etc/otelcol/config.yaml
+    volumes:
+      - ../configs/otel-collector.yaml:/etc/otelcol/config.yaml:ro
+    ports:
+      - "127.0.0.1:${OTEL_GRPC_PORT}:4317"
+      - "127.0.0.1:${OTEL_HTTP_PORT}:4318"
+    depends_on:
+      - jaeger
+
+volumes:
+  postgres-data: {}

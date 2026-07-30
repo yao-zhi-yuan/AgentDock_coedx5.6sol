@@ -1,0 +1,45 @@
+apiVersion: agentdock.dev/v1alpha1
+kind: HarnessRun
+
+metadata:
+  name: fix-handler-layer-violation
+
+target:
+  adapter: eino
+  repository: examples/buggy-go-service
+  revision: main
+
+task:
+  prompt: |
+    Fix the user query handler while preserving the repository's architecture rules.
+  allowedPaths:
+    - internal/
+    - tests/
+
+runtime:
+  maxRepairRounds: 3
+  timeout: 10m
+  tokenBudget: 30000
+
+sandbox:
+  network: none
+  cpu: 1
+  memory: 512Mi
+  pids: 128
+  commandTimeout: 60s
+
+verification:
+  - type: go-test
+    command:
+      - go
+      - test
+      - ./...
+  - type: architecture
+    ruleSet: configs/architecture-rules.example.yaml
+  - type: diff-scope
+
+faults:
+  - type: tool-error
+    tool: repo.search
+    occurrence: 2
+    error: temporary_unavailable
