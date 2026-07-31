@@ -1,0 +1,45 @@
+cmd/worker/main.go
+  s_553ffe448cbe0d::t_f7c027354fe40a 64,71
+docs/status/phase-3.md
+  s_5d9bfbef63e3a1::t_c7c4e561c0bd92 6,12-17,204-262,277-280,493-517,589,591-594,658-751,754-762
+internal/controller/managed.go
+  s_5d9bfbef63e3a1::t_ddc6dc4ec6d7e3 215-217
+internal/controller/worker_kill_chaos_test.go
+  s_5d9bfbef63e3a1::t_db586c0a06487d 74-81,89,92,111,165,183,198,245,249-255,259-277,281-286,289-290,292-298
+internal/controller/worker_process_integration_test.go
+  s_5d9bfbef63e3a1::t_a9c22f5643c924 45-46,85,101,109-116,120,163-171,180-181,184,186,204,246-251,254,257-263,275,279,282-283,285,297,312,333,355,367,375,379-385,389-406,414,418-424,428-444,450,455-456,458,461-467
+internal/controller/worker_process_test_helper_test.go
+  s_5d9bfbef63e3a1::t_d7f61306f23bfc 1-106
+internal/migration/migration_integration_test.go
+  s_5d9bfbef63e3a1::t_4099d779705fb7 192-273,346-383,397-398,400
+migrations/000006_phase3_receipt_artifact_digest_not_null.down.sql
+  s_5d9bfbef63e3a1::t_aa592a461629a7 1-14
+migrations/000006_phase3_receipt_artifact_digest_not_null.up.sql
+  s_5d9bfbef63e3a1::t_90f52b3b501b08 1-21
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "8873984c85ed7244fc46b13ff0417df013a28385",
+  "prompts": {},
+  "sessions": {
+    "s_553ffe448cbe0d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fb6d4-82d2-7273-a1e1-9328b18d6dca",
+        "model": "unknown"
+      },
+      "human_author": "yaozhiyuan.123 <yaozhiyuan.123@bytedance.com>"
+    },
+    "s_5d9bfbef63e3a1": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fb2e9-32aa-78f1-84f8-1817db09de22",
+        "model": "unknown"
+      },
+      "human_author": "yaozhiyuan.123 <yaozhiyuan.123@bytedance.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
