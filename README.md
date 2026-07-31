@@ -72,6 +72,15 @@ go run ./cmd/agentdock run events demo-cli
 
 Standalone `run` commands reject a missing `AGENTDOCK_DATABASE_URL`; they never silently create an authoritative memory-only Run. The compatible memory Store remains available through dependency injection, the explicit `session` compatibility command, and `demo-fake`. Checkpoints are disposable verified snapshots: Rebuild compares their projection with the authoritative event prefix, and a missing or inconsistent checkpoint falls back to complete Event Log reduction.
 
+`run step` is the phase-2 compatibility executor for a PostgreSQL Run that has
+never acquired a Lease. Once a Lease row exists, the Run is permanently in
+managed mode: `run step` is rejected and execution must use `cmd/worker` plus
+`ReconcileLeased`. Operator `pause`, `resume`, and `cancel` commands still
+persist desired-state intent without a Worker token; the leased Worker observes
+and converges that intent. Initial Lease acquisition returns a retryable held
+result while an unleased compatibility action has a durable plan but no result,
+so one action cannot be split across the legacy and managed event models.
+
 ## Consistency and security claims
 
 This phase does not claim exactly-once. PostgreSQL makes Event append, Run version, and fencing validation atomic, while an external action still cannot share that transaction. The implemented claim is at-least-once plus scoped idempotency and fencing. An unsafe ambiguous outcome enters `WaitingApproval`.

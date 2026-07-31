@@ -17,6 +17,7 @@ var (
 	ErrStaleFencingToken     = errors.New("stale worker fencing token")
 	ErrMissingActionReceipt  = errors.New("action completion has no matching durable receipt")
 	ErrActionReceiptMismatch = errors.New("action completion does not match durable receipt")
+	ErrManagedRunLegacyEvent = errors.New("managed run rejects legacy lifecycle event")
 	ErrArtifactNotFound      = errors.New("artifact not found")
 	ErrArtifactIntegrity     = errors.New("artifact integrity check failed")
 )
@@ -82,5 +83,13 @@ type EventStore interface {
 	Append(context.Context, uint64, domain.Event) (AppendResult, error)
 }
 
+// ManagedRunInspector lets Controller reject the unleased compatibility
+// Reconcile path before it attempts an execution append. The PostgreSQL Store
+// remains the authoritative enforcement point if this preflight races.
+type ManagedRunInspector interface {
+	IsManagedRun(context.Context, string) (bool, error)
+}
+
 var _ EventStore = (*MemoryEventStore)(nil)
 var _ EventStore = (*PostgresEventStore)(nil)
+var _ ManagedRunInspector = (*PostgresEventStore)(nil)

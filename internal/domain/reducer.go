@@ -137,6 +137,15 @@ func ReduceFromCheckpoint(checkpoint State, events []Event) (State, error) {
 }
 
 func applyEvent(state *State, event Event) error {
+	if state.PendingActionType != "" && legacyLifecycleResultEvent(event.Type) {
+		return fmt.Errorf(
+			"%w: legacy event %s cannot resolve managed action %s/%q",
+			ErrInvalidTransition,
+			event.Type,
+			state.PendingActionType,
+			state.PendingActionID,
+		)
+	}
 	switch event.Type {
 	case EventRunCreated:
 		if state.Exists {
@@ -323,6 +332,33 @@ func applyEvent(state *State, event Event) error {
 
 	default:
 		return fmt.Errorf("%w: %s", ErrUnsupportedEvent, event.Type)
+	}
+}
+
+func legacyLifecycleResultEvent(eventType EventType) bool {
+	switch eventType {
+	case EventAttemptStarted,
+		EventWorkspaceProvisionPlanned,
+		EventWorkspaceProvisioned,
+		EventReasoningPlanned,
+		EventReasoningCompleted,
+		EventToolCallPlanned,
+		EventToolCallCompleted,
+		EventToolCallFailed,
+		EventPatchProduced,
+		EventVerificationPlanned,
+		EventVerificationPassed,
+		EventVerificationFailed,
+		EventRepairScheduled,
+		EventApprovalRequested,
+		EventApprovalResolved,
+		EventCheckpointSaved,
+		EventRunSucceeded,
+		EventRunFailed,
+		EventRunCancelled:
+		return true
+	default:
+		return false
 	}
 }
 

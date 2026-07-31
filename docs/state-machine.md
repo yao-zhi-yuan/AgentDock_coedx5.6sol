@@ -88,6 +88,10 @@ Repair is bounded to three rounds. A verifier failure with remaining budget sche
 - One Reconcile decision produces at most one external action.
 - Every external action has a stable `action_id` and a durable planned event.
 - A stale fencing token cannot append a lease-sensitive event.
+- Once a Run has a Lease, unleased compatibility Reconcile and legacy
+  lifecycle execution events cannot advance it.
+- A generic pending action cannot be resolved by its old lifecycle result
+  counterpart; only `ActionCompleted` or `ActionFailed` may clear it.
 - Success requires current blocking verifier evidence for the current workspace/spec/verifier versions.
 - Pause emits no new side-effect command.
 - Terminal states cannot advance.

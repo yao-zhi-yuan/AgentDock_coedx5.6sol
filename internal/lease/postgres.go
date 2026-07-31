@@ -156,6 +156,18 @@ func (manager *PostgresManager) Acquire(
 		return AcquireResult{}, err
 	}
 	if !found {
+		actionID, pending, err := unresolvedLegacyAction(ctx, tx, runID)
+		if err != nil {
+			return AcquireResult{}, err
+		}
+		if pending {
+			return AcquireResult{}, fmt.Errorf(
+				"%w: run_id=%q action_id=%q",
+				ErrLegacyExecutionInProgress,
+				runID,
+				actionID,
+			)
+		}
 		created, err := insertLease(ctx, tx, runID, workerID, 1, ttl)
 		if err != nil {
 			return AcquireResult{}, err
@@ -526,6 +538,65 @@ func loadLeaseForUpdate(ctx context.Context, tx pgx.Tx, runID string) (Lease, bo
 	current.ExpiresAt = current.ExpiresAt.UTC()
 	current.HeartbeatAt = current.HeartbeatAt.UTC()
 	return current, true, nil
+}
+
+// unresolvedLegacyAction detects the only compatibility Reconcile operations
+// that persist a plan before their result. Acquire calls it while holding the
+// same per-Run advisory lock as EventStore.Append. Therefore either the legacy
+// result commits before initial managed mode is selected, or initial Acquire
+// waits/retries without splitting one action across the two event models.
+func unresolvedLegacyAction(
+	ctx context.Context,
+	tx pgx.Tx,
+	runID string,
+) (string, bool, error) {
+	var actionID string
+	err := tx.QueryRow(ctx, `
+		SELECT planned.payload->>'action_id'
+		FROM events planned
+		WHERE planned.run_id = $1
+		  AND planned.event_type IN ($2, $3)
+		  AND NOT EXISTS(
+			SELECT 1
+			FROM events result
+			WHERE result.run_id = planned.run_id
+			  AND result.seq > planned.seq
+			  AND (
+				result.event_type IN ($4, $5)
+				OR (
+					result.payload->>'action_id' = planned.payload->>'action_id'
+					AND (
+						(
+							planned.event_type = $2
+							AND result.event_type IN ($6, $7)
+						)
+						OR (
+							planned.event_type = $3
+							AND result.event_type IN ($8, $9)
+						)
+					)
+				)
+			  )
+		  )
+		ORDER BY planned.seq DESC
+		LIMIT 1`,
+		runID,
+		domain.EventReasoningPlanned,
+		domain.EventVerificationPlanned,
+		domain.EventRunFailed,
+		domain.EventRunCancelled,
+		domain.EventReasoningCompleted,
+		domain.EventToolCallFailed,
+		domain.EventVerificationPassed,
+		domain.EventVerificationFailed,
+	).Scan(&actionID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("inspect unresolved legacy action: %w", err)
+	}
+	return actionID, true, nil
 }
 
 func loadLeaseForShare(ctx context.Context, tx pgx.Tx, runID string) (Lease, bool, error) {

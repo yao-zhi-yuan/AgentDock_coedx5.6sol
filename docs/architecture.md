@@ -102,7 +102,25 @@ under a row lock. Renewal extends expiry without changing the token. Lease
 checks and expiry writes use PostgreSQL `clock_timestamp()` after lock waits;
 transaction-start time is never treated as post-wait authority.
 
-A lease grants temporary scheduling ownership; it cannot revoke a paused, killed, or partitioned process. Every lease-sensitive append and Receipt presents the Worker ID and token. PostgreSQL checks the current owner, exact token, and unexpired TTL in the same transaction before idempotency replay. A stale Worker therefore cannot turn an old duplicate into an apparent success.
+A lease grants temporary scheduling ownership; it cannot revoke a paused,
+killed, or partitioned process. The first durable Lease row permanently marks
+the Run as managed. PostgreSQL serializes that mode decision with Lease
+acquisition using the same per-Run advisory lock. A managed Run rejects the
+unleased compatibility `Reconcile` path and all legacy lifecycle execution
+events; generic action Events and Receipts must present the Worker ID and token.
+PostgreSQL checks the current owner, exact token, and unexpired TTL in the same
+transaction before idempotency replay. Reducer validation separately rejects a
+legacy result while a generic action is pending. A stale or identity-less
+writer therefore cannot turn an old duplicate or legacy event into apparent
+progress. `RunDesiredStateChanged` remains an explicit operator write, so
+Pause/Resume/Cancel intent does not require a Worker Lease.
+
+The compatibility path has two plan/result pairs (`ReasoningPlanned` and
+`VerificationPlanned`). Initial Lease acquisition inspects them under the same
+advisory lock. If a plan is unresolved, acquisition returns a retryable held
+result and creates no Lease/token. Once the compatibility result commits, the
+next acquisition creates token 1. Thus acquisition cannot split one
+plan→execute→result operation across the legacy and managed event models.
 
 ## Crash windows
 

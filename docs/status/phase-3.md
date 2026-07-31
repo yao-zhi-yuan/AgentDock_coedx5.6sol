@@ -1,10 +1,14 @@
 # Phase 3 status: Worker lease, fencing, and crash recovery
 
 - Implementation date: 2026-07-30
-- Final host verification date: 2026-07-31
+- Pre-remediation host verification date: 2026-07-31
+- External Gate 3 remediation date: 2026-07-31
 - Branch: `codex/agentdock-verify`
 - Gate 2 baseline: `898b876ebbf919acd11b99b886bd931f4b6ecffa`
-- Planned commit: `feat: add lease fencing and crash recovery`
+- Phase-3 implementation commit:
+  `d9341f2b39de4f84e11aadb5a5f0229929c529d0`
+  (`feat: add lease fencing and crash recovery`)
+- Gate-3 remediation increment: this unpublished follow-up commit
 - Construction contract: repository-root `AgentDock-Verify-施工计划.md`
 
 ## Scope
@@ -138,6 +142,59 @@ were not counted as acceptance:
       bytes inside `ActionCompleted` transaction validation. The identical
       command exited 0 and proves the rejected append changes neither Run
       version nor pending action; normal recovery enters `WaitingApproval`.
+13. External blank-task Gate 3 managed-Run bypass:
+    - Review task `019fb656-45db-7d41-bb97-fce4db7ef31e` reported
+      **Critical 1 / Important 0 / Minor 0** after reproducing the issue with
+      real PostgreSQL. While Worker A held token 1 and a fenced
+      `ActionPlanned(ApplyPatch)` was pending, durable `agentdock run step`
+      called the unfenced compatibility `Controller.Reconcile` and appended an
+      identity-less legacy `PatchProduced`. The Run advanced from `Acting` to
+      `Verifying`, A's legitimate `ActionCompleted` could no longer apply, and
+      takeover could only enter `WaitingApproval`.
+    - Domain red command:
+      `go test -count=1 -v ./internal/domain -run TestManagedPendingApplyPatchRejectsLegacyPatchProduced`.
+      Exit: 1 because the reducer accepted the legacy result.
+    - PostgreSQL red command:
+      `go test -tags=integration -count=1 -v ./cmd/agentdock -run TestDurableRunStepAndLegacyResultsCannotBypassManagedLease`.
+      Exit: 1 because `run step` succeeded and appended a no-Worker/no-token
+      `PatchProduced` at sequence 9.
+    - Fix: the durable Lease row is now a permanent managed-mode marker.
+      Acquisition and non-operator Event append serialize on the same per-Run
+      PostgreSQL advisory lock. Managed Run appends require current fencing
+      regardless of caller fields, and legacy lifecycle execution facts are
+      rejected even with the current token. `Controller.Reconcile` refuses
+      managed Runs, while the Event Store remains the authoritative defense
+      against races and direct calls. The reducer independently rejects legacy
+      results while a generic action is pending.
+    - Both identical red commands then exited 0. The first PostgreSQL green
+      attempt had one test-only assertion that inspected the latest reconcile
+      call's returned slice instead of the authoritative Event Log; the Run
+      had already reached `Verifying`. After correcting that assertion to read
+      the Event Log, the same test passed and proved `run step`, identity-less
+      direct append, and current-token legacy append leave Run version, state,
+      and Event count unchanged; the legitimate Worker still completes.
+14. Fresh full-range review initial-acquisition split:
+    - The first post-Critical complete-range read-only review reported
+      **Critical 1 / Important 0 / Minor 1**. It found that the advisory lock
+      initially covered individual appends but not the interval between a
+      compatibility `ReasoningPlanned` and its result. Initial Acquire could
+      insert the permanent managed marker while the old Controller was inside
+      the Reasoner, after which its legacy result was rejected and the mixed
+      pending projection could not converge.
+    - PostgreSQL red command:
+      `go test -tags=integration -count=1 -v ./cmd/agentdock -run TestInitialLeaseWaitsForInFlightLegacyReconcile`.
+      Exit: 1. Acquire returned nil, then the released old Reconcile failed its
+      result append with `stale worker fencing token`.
+    - Fix: while holding the same per-Run advisory lock, initial Acquire checks
+      the Event Log for an unresolved compatibility `ReasoningPlanned` or
+      `VerificationPlanned`. It returns
+      `ErrLegacyExecutionInProgress`, which wraps retryable `ErrLeaseHeld`, and
+      creates neither a Lease row nor a token. After the matching result
+      commits, acquisition succeeds with initial token 1.
+    - The identical command then exited 0. Its controlled blocking Reasoner
+      proves no Lease exists during the old external action, old Reconcile
+      completes normally, and only the subsequent Acquire selects managed
+      mode.
 
 Before applying migration 000004 to the long-lived local development database,
 117 obsolete synthetic phase-3 red/early-green Receipt rows referenced fake
@@ -170,7 +227,19 @@ The corresponding focused commands were rerun after each fix and exited 0.
    - every generic action/lease event must include Worker ID and token;
    - current owner, exact token, and unexpired TTL are checked inside Append;
    - checking occurs before idempotent replay;
-   - stale events return `ErrStaleFencingToken`.
+   - stale events return `ErrStaleFencingToken`;
+   - the first durable Lease row permanently places the Run in managed mode;
+   - initial acquisition and Event append serialize mode selection on the same
+     per-Run advisory lock;
+   - initial acquisition refuses unresolved compatibility plan/result work
+     with a retryable held result, so no external action is split across modes;
+   - every managed lifecycle append is fenced based on persisted mode, not on
+     whether the caller supplied Worker fields;
+   - old lifecycle execution facts are rejected for managed Runs even when
+     carrying the current token, and `Controller.Reconcile` cannot operate a
+     managed Run;
+   - operator `DesiredStateChanged` remains the explicit unfenced exception so
+     Pause, Resume, and Cancel work across processes.
 5. Added stable `ActionPlanned / ActionCompleted / ActionFailed` facts and a
    deterministic reducer projection for pending action type/scope, Receipt,
    completion, known failure, and ambiguous `WaitingApproval`.
@@ -222,6 +291,16 @@ The tests explicitly prove:
 - renewal changes expiry/heartbeat without changing the token;
 - a stale Worker cannot append a new event or replay an event already present;
 - a stale Worker cannot write a Receipt;
+- durable `run step` cannot operate a managed Run;
+- an identity-less legacy lifecycle result cannot append to a managed Run;
+- a current-token legacy lifecycle result also cannot mix with generic managed
+  actions;
+- every rejected compatibility write preserves Run version, state, and Event
+  count, while the legitimate Worker can still complete;
+- reducer projection rejects legacy lifecycle results while a generic action
+  is pending;
+- initial Acquire cannot insert a Lease between a legacy planned fact and its
+  external execution/result; it issues token 1 only after legacy completion;
 - `ActionCompleted` requires an existing matching Receipt and cannot alter its
   output;
 - a Receipt requires a matching pending `ActionPlanned`;
@@ -314,9 +393,41 @@ The reviews also confirmed the Worker concurrency Race tests, per-test Chaos
 Artifact directory isolation, and no phase-4 boundary crossing. These reviews
 are not the external blank-task Gatekeeper release decision.
 
-## Final automatic acceptance
+The subsequent external blank-task Gatekeeper review task
+`019fb656-45db-7d41-bb97-fce4db7ef31e` rejected the earlier Gate conclusion
+with **Critical 1 / Important 0 / Minor 0** for the managed-Run bypass recorded
+in red evidence item 13. Therefore the earlier internal review result and the
+acceptance tables below are pre-remediation baseline evidence only. They are
+not accepted as proof of the remediation. Fresh read-only reviews of both the
+fix increment and the complete Gate-2-base-to-working-tree phase-3 range, plus
+the complete host Gate, are required before Gate 3 can return to pass.
 
-All commands below were executed after the authorized host continuation. The
+The first complete-range remediation review then found the additional
+initial-acquisition split recorded in red evidence item 14 and reported
+**Critical 1 / Important 0 / Minor 1; Ready: No**. Its Critical was fixed with
+the deterministic PostgreSQL red→green above. Its Minor (the stale
+`Planned commit` label) was also corrected. Because that review observed the
+pre-fix snapshot, new incremental and complete-range read-only reviews are
+required before final verification.
+
+The replacement fresh-context reviews observed the final fix:
+
+- remediation increment: **Critical 0 / Important 0 / Minor 1; Ready: Yes**;
+  its only Minor was the stale `Final host verification date` label, which is
+  now explicitly marked pre-remediation;
+- complete Gate-2 baseline `898b876e` through the current working tree:
+  **Critical 0 / Important 0 / Minor 0; Ready: Yes**.
+
+Both reviews were read-only and explicitly verified the existing-Lease bypass,
+initial Acquire interleaving, advisory/Lease/Run lock order, Worker polling,
+all production Event/Receipt write entrances, operator desired-state
+exception, Receipt/Artifact evidence, and phase-4 boundary.
+
+## Pre-remediation automatic acceptance
+
+All commands below were executed before the external Critical was reported.
+They document the previous baseline but are not reused as remediation Gate
+evidence. The
 Go cache was `GOCACHE=/private/tmp/agentdock-go-cache-phase3-final`; PostgreSQL
 commands used
 `AGENTDOCK_DATABASE_URL=postgres://agentdock:agentdock_dev_only@127.0.0.1:55433/agentdock?sslmode=disable`.
@@ -383,9 +494,78 @@ action_receipts_artifact_fk|f|true
 Final whitespace, scope, review, parent, commit, and clean-worktree checks are
 performed after this document is finalized.
 
+## Post-remediation final automatic acceptance
+
+All results in this section were freshly produced from the final remediation
+code on 2026-07-31. They do not reuse the pre-remediation table.
+
+### Required phase-3 Gate and managed-mode regressions
+
+| Command | Exit | Key evidence |
+|---|---:|---|
+| `docker compose up -d postgres` | 0 | repository PostgreSQL running |
+| `make migrate` | 0 | `migrations applied` |
+| `go test -tags=integration ./internal/lease/... ./internal/controller/...` | 0 | Lease 2.603s; Controller 10.861s |
+| `go test -tags=chaos ./internal/controller/...` | 0 | exact required Chaos package command passed |
+| `go test -race ./internal/...` | 0 | all internal packages passed under Race |
+| focused two-Critical PostgreSQL command | 0 | existing-Lease bypass and initial-Acquire interleaving both printed PASS |
+| `go test -tags=integration -count=1 ./internal/lease/... ./cmd/agentdock` | 0 | Lease and durable CLI package passed |
+| `make chaos-worker-kill` | 0 | `iterations=100 killed=100 succeeded=100 waiting_approval=0 artifact_present_at_kill=46`; test 44.43s |
+| `make demo-phase3` | 0 | A token 1 killed; B token 2 takeover; restarted A stale append rejected; final `Succeeded` |
+
+The first `make chaos-worker-kill` tool transport returned only the test start
+line and no final status/statistics, so it was not accepted. The identical
+command was rerun to an explicit process exit 0 and the complete statistics
+above.
+
+The focused PostgreSQL regressions assert:
+
+- durable `run step`, identity-less direct legacy append, and current-token
+  legacy append all fail without changing Run version, state, or Event count;
+- the legitimate Worker/token still completes the pending generic action;
+- Pause/Resume/Cancel desired-state writes remain cross-process operator
+  controls and Cancel converges only through the leased Worker;
+- initial Acquire during a blocked compatibility Reasoner returns retryable
+  `ErrLegacyExecutionInProgress`, creates no Lease/token, lets the old result
+  commit, then succeeds with token 1.
+
+### Phase-2 and phase-1 regression
+
+| Command | Exit | Key evidence |
+|---|---:|---|
+| `go test -tags=integration -count=1 ./internal/store/... ./internal/controller/...` | 0 | Store 6.117s; Controller 8.087s |
+| `go test -tags=integration -count=1 ./internal/migration/... ./cmd/agentdock` | 0 | Migration 1.626s; CLI 1.291s |
+| `go test -race -count=1 ./internal/store/... ./internal/controller/...` | 0 | both packages passed |
+| `make test-rebuild-state` | 0 | domain golden/1000 Event and PostgreSQL Checkpoint rebuild passed |
+| `make test-integration` | 0 | Store, Lease, Controller, Migration, and CLI passed |
+| phase-1 six-test Gatekeeper command with `-count=1 -v` | 0 | all six named regressions printed PASS |
+| three phase-1 concurrent Pause tests with `-count=50` | 0 | all 50 repetitions passed |
+
+### Full repository, environment, and demonstrations
+
+| Command | Exit | Key evidence |
+|---|---:|---|
+| `go test -count=1 ./...` | 0 | all packages passed uncached |
+| `go test -race -count=1 ./...` | 0 | all packages passed uncached under Race |
+| `make test` | 0 | full Go target passed |
+| `make test-race` | 0 | full Race target passed |
+| `make lint` | 0 | no diagnostics |
+| `go vet ./...` | 0 | no diagnostics |
+| `go mod verify` | 0 | `all modules verified` |
+| `docker compose up -d` | 0 | PostgreSQL, OTel Collector, and Jaeger started |
+| `make doctor` with host access | 0 | Go, Docker, Compose, four port mappings, YAML, and Compose model passed |
+| `docker compose stop otel-collector jaeger` | 0 | Doctor-only services stopped; PostgreSQL retained |
+| final `make migrate` | 0 | `migrations applied` |
+| `make demo-fake` | 0 | normal and Pause/Resume scenarios reached `Succeeded` |
+| read-only schema queries | 0 | `5|false`; Receipt Artifact digest-pair and FK constraints both validated |
+| `git diff --check` before status finalization | 0 | no whitespace errors |
+| plan/scope/VCS pre-commit check | 0 | branch correct; HEAD `d9341f2`, parent `898b876e`; construction plan unchanged |
+
 ## Gate 3
 
-**INTERNAL GATE PASS; READY FOR THE SINGLE PHASE-3 COMMIT.** The required
-fresh-context review reports Critical/Important/Minor 0, all final host Gates
-above exit 0, and phase 4 remains unstarted. External blank-task Gatekeeper
-review remains the final release authority.
+**INTERNAL GATE PASS; READY FOR EXTERNAL GATE 3 RE-REVIEW.** Both reported
+Critical paths have stable PostgreSQL red→green coverage, the replacement
+read-only full-range review reports Critical/Important/Minor 0, and every fresh
+post-remediation Gate above exits 0. Phase 4 remains unstarted. This internal
+result does not override the external blank-task Gatekeeper as final release
+authority.

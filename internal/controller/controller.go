@@ -12,8 +12,9 @@ import (
 )
 
 var (
-	ErrInvalidRequest = errors.New("invalid controller request")
-	ErrRunExists      = errors.New("run already exists")
+	ErrInvalidRequest          = errors.New("invalid controller request")
+	ErrRunExists               = errors.New("run already exists")
+	ErrManagedRunRequiresLease = errors.New("managed Run requires ReconcileLeased")
 )
 
 // Controller owns desired-state changes and one deterministic Reconcile path.
@@ -137,6 +138,26 @@ func (controller *Controller) Reconcile(ctx context.Context, runID string) (Reco
 	state, err := controller.GetRun(ctx, runID)
 	if err != nil {
 		return ReconcileResult{}, err
+	}
+	if controller.leaseManager != nil || state.PendingActionType != "" {
+		return ReconcileResult{State: state}, fmt.Errorf(
+			"%w: run_id=%q",
+			ErrManagedRunRequiresLease,
+			runID,
+		)
+	}
+	if inspector, ok := controller.store.(store.ManagedRunInspector); ok {
+		managed, inspectErr := inspector.IsManagedRun(ctx, runID)
+		if inspectErr != nil {
+			return ReconcileResult{}, inspectErr
+		}
+		if managed {
+			return ReconcileResult{State: state}, fmt.Errorf(
+				"%w: run_id=%q",
+				ErrManagedRunRequiresLease,
+				runID,
+			)
+		}
 	}
 	command := domain.Decide(state)
 	result := ReconcileResult{Command: command, State: state}

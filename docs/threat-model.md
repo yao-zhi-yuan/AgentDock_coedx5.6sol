@@ -45,7 +45,7 @@ The model output, target repository, generated patch, tool arguments, and sandbo
 | Credential leakage | environment allowlist, redaction, no secrets in events/traces/cassettes | provider or operator misconfiguration |
 | Container breakout | non-root user, read-only root, dropped capabilities, resource limits | shared kernel means breakout cannot be ruled out |
 | Denial of service | CPU/memory/PID/time/output limits and cleanup | disk pressure or Docker daemon impact |
-| Stale worker writes | **Implemented in phase 3:** PostgreSQL owner/token/expiry checks for managed Events and Receipts | non-database side effect must still be scoped-idempotent/receipted |
+| Stale or identity-less execution writes | **Implemented in phase 3:** durable Lease-row mode, PostgreSQL owner/token/expiry checks, legacy-event rejection, and reducer mixed-path defense | non-database side effect must still be scoped-idempotent/receipted |
 | Forged verifier success | verifier identity/role and digest-bound evidence | compromised verifier worker or store |
 | Replay disclosure | redacted immutable cassettes, credential scanning | prompts or repository text may still be sensitive |
 | Replay false equivalence | pinned versions/digests and explicit divergence | unavoidable external or platform nondeterminism |
@@ -85,6 +85,9 @@ Each later phase must update this document with implemented controls and test ev
   fencing token.
 - Managed Event and Receipt transactions reject stale or expired authority
   before idempotency replay, using wall-clock time after lock waits.
+- A durable Lease row permanently selects managed execution. The Store rejects
+  unleased or legacy lifecycle execution events for that Run, while explicit
+  operator desired-state changes remain available.
 - Unknown unsafe outcomes stop in `WaitingApproval`.
 - Malformed Receipt output or changed Artifact bytes cannot complete a Run;
   recovery dry-reduces and re-hashes the evidence, then stops in

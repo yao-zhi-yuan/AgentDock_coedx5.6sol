@@ -88,7 +88,25 @@ In phase 1, Pause rejects a new planned fact but does not reject the matching re
 
 ## Lease takeover
 
-Lease expiry permits a new Worker to acquire a strictly larger fencing token without assuming the old process stopped. Every generic action Event and Action Receipt is lease-sensitive. PostgreSQL rejects a missing, mismatched, expired, or stale Worker/token before accepting even an idempotent replay. These checks use wall-clock database time after transaction lock waits, not PostgreSQL's transaction-start timestamp.
+Lease expiry permits a new Worker to acquire a strictly larger fencing token
+without assuming the old process stopped. The existence of a durable Lease row
+permanently selects the generic managed-action event model for that Run.
+PostgreSQL takes the same per-Run advisory lock used by Lease acquisition before
+deciding whether an execution append is managed. Every generic action Event and
+Action Receipt is lease-sensitive; a managed Run also rejects old lifecycle
+execution facts such as `PatchProduced`, even when a current token is supplied.
+PostgreSQL rejects a missing, mismatched, expired, or stale Worker/token before
+accepting even an idempotent replay. `RunDesiredStateChanged` is the narrow
+operator exception used by Pause/Resume/Cancel. These checks use wall-clock
+database time after transaction lock waits, not PostgreSQL's transaction-start
+timestamp.
+
+Before the first Lease row is inserted, acquisition also checks for an
+unresolved compatibility `ReasoningPlanned` or `VerificationPlanned` fact under
+that advisory lock. It returns a retryable held result without issuing a token
+until the matching result commits. This makes the transition into managed mode
+linearizable across the complete legacy plan/result operation rather than only
+across an individual append.
 
 ## Event Replay versus Execution Replay
 

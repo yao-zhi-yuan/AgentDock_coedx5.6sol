@@ -44,7 +44,14 @@ go run ./cmd/agentdock run step restart-demo
 go run ./cmd/agentdock run events restart-demo
 ```
 
-Continue `run step` until `Succeeded`; `run events` shows a contiguous sequence. This demonstrates database reconstruction and the same Reconcile path, not lease takeover, Worker Kill recovery, fencing, Docker isolation, Eino, real verifiers, repair, fault injection, OTel, or product Replay.
+Continue `run step` until `Succeeded`; `run events` shows a contiguous
+sequence. This is deliberately a phase-2 compatibility Run that has never
+acquired a Lease. Once any Worker acquires a Run Lease, `run step` is rejected
+and all execution must use `cmd/worker`/`ReconcileLeased`; only operator
+pause/resume/cancel intent remains unfenced. The phase-2 sequence demonstrates
+database reconstruction, not lease takeover, Worker Kill recovery, fencing,
+Docker isolation, Eino, real verifiers, repair, fault injection, OTel, or
+product Replay.
 
 Phase 3 adds the required two-Worker recovery demonstration:
 

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 
@@ -137,10 +138,14 @@ func newCancelCommand(runtime *controller.Controller) *cobra.Command {
 		Short: "Persist cancel intent and converge the Run",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(command *cobra.Command, args []string) error {
-			if _, err := runtime.SetDesiredState(command.Context(), args[0], domain.DesiredCancelled); err != nil {
+			state, err := runtime.SetDesiredState(command.Context(), args[0], domain.DesiredCancelled)
+			if err != nil {
 				return err
 			}
 			result, err := runtime.Reconcile(command.Context(), args[0])
+			if errors.Is(err, controller.ErrManagedRunRequiresLease) {
+				return writeJSON(command.OutOrStdout(), state)
+			}
 			if err != nil {
 				return err
 			}

@@ -10,11 +10,15 @@ import (
 )
 
 var (
-	ErrInvalidLease       = errors.New("invalid lease request")
-	ErrWorkerNotFound     = errors.New("worker not registered")
-	ErrWorkerRegistered   = errors.New("worker incarnation already registered")
-	ErrLeaseNotFound      = errors.New("lease not found")
-	ErrLeaseHeld          = errors.New("lease held by another worker")
+	ErrInvalidLease              = errors.New("invalid lease request")
+	ErrWorkerNotFound            = errors.New("worker not registered")
+	ErrWorkerRegistered          = errors.New("worker incarnation already registered")
+	ErrLeaseNotFound             = errors.New("lease not found")
+	ErrLeaseHeld                 = errors.New("lease held by another worker")
+	ErrLegacyExecutionInProgress = fmt.Errorf(
+		"%w: unleased compatibility Reconcile action is still in progress",
+		ErrLeaseHeld,
+	)
 	ErrLeaseExpired       = errors.New("lease expired")
 	ErrStaleLease         = errors.New("stale worker or fencing token")
 	ErrReceiptNotFound    = errors.New("action receipt not found")

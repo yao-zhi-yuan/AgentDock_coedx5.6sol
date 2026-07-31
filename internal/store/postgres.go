@@ -160,6 +160,28 @@ func (store *PostgresEventStore) Rebuild(ctx context.Context, runID string) (dom
 	return rebuilt, nil
 }
 
+// IsManagedRun reports whether a durable Lease row has permanently moved the
+// Run onto the phase-3 managed execution path. This is a Controller/CLI
+// preflight only; Append repeats the decision under the acquisition advisory
+// lock before accepting any execution event.
+func (store *PostgresEventStore) IsManagedRun(ctx context.Context, runID string) (bool, error) {
+	if runID == "" {
+		return false, fmt.Errorf("%w: run_id is required", ErrInvalidAppend)
+	}
+	var managed bool
+	if err := store.pool.QueryRow(ctx, `
+		SELECT EXISTS(
+			SELECT 1
+			FROM leases
+			WHERE run_id = $1
+		)`,
+		runID,
+	).Scan(&managed); err != nil {
+		return false, fmt.Errorf("inspect managed Run mode: %w", err)
+	}
+	return managed, nil
+}
+
 // Append validates expectedVersion, inserts one event, and updates the derived
 // Run row in one transaction. Database time overrides caller-supplied time.
 func (store *PostgresEventStore) Append(
@@ -212,13 +234,44 @@ func (store *PostgresEventStore) Append(
 		}
 	}
 
+	managedRun := false
+	if event.Type != domain.EventRunCreated &&
+		event.Type != domain.EventDesiredStateChanged {
+		if _, err := tx.Exec(
+			ctx,
+			`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
+			event.RunID,
+		); err != nil {
+			return AppendResult{}, fmt.Errorf("lock Run execution mode: %w", err)
+		}
+		if err := tx.QueryRow(ctx, `
+			SELECT EXISTS(
+				SELECT 1
+				FROM leases
+				WHERE run_id = $1
+			)`,
+			event.RunID,
+		).Scan(&managedRun); err != nil {
+			return AppendResult{}, fmt.Errorf("inspect managed Run mode in append: %w", err)
+		}
+	}
+	requiresFencing := leaseSensitiveEvent(event) || managedRun
+
 	// Lease is always locked before Run. RecordReceipt follows the same
 	// Lease->Run order through its Receipt foreign key, avoiding a deadlock
 	// between a fenced append and a concurrent Receipt transaction.
-	if leaseSensitiveEvent(event) {
+	if requiresFencing {
 		if err := validateFencingToken(ctx, tx, event); err != nil {
 			return AppendResult{}, err
 		}
+	}
+	if managedRun && legacyLifecycleEvent(event.Type) {
+		return AppendResult{}, fmt.Errorf(
+			"%w: run_id=%q event_type=%s",
+			ErrManagedRunLegacyEvent,
+			event.RunID,
+			event.Type,
+		)
 	}
 
 	var actualVersion int64
@@ -232,7 +285,7 @@ func (store *PostgresEventStore) Append(
 	// The Lease share lock prevents takeover while Run may be contended, but
 	// wall-clock TTL can still elapse during that wait. Recheck after the Run
 	// lock so authority is valid at the append decision point.
-	if leaseSensitiveEvent(event) {
+	if requiresFencing {
 		if err := validateFencingToken(ctx, tx, event); err != nil {
 			return AppendResult{}, err
 		}
@@ -378,6 +431,33 @@ func leaseSensitiveEvent(event domain.Event) bool {
 		return true
 	default:
 		return event.WorkerID != "" || event.FencingToken != 0
+	}
+}
+
+func legacyLifecycleEvent(eventType domain.EventType) bool {
+	switch eventType {
+	case domain.EventAttemptStarted,
+		domain.EventWorkspaceProvisionPlanned,
+		domain.EventWorkspaceProvisioned,
+		domain.EventReasoningPlanned,
+		domain.EventReasoningCompleted,
+		domain.EventToolCallPlanned,
+		domain.EventToolCallCompleted,
+		domain.EventToolCallFailed,
+		domain.EventPatchProduced,
+		domain.EventVerificationPlanned,
+		domain.EventVerificationPassed,
+		domain.EventVerificationFailed,
+		domain.EventRepairScheduled,
+		domain.EventApprovalRequested,
+		domain.EventApprovalResolved,
+		domain.EventCheckpointSaved,
+		domain.EventRunSucceeded,
+		domain.EventRunFailed,
+		domain.EventRunCancelled:
+		return true
+	default:
+		return false
 	}
 }
 
