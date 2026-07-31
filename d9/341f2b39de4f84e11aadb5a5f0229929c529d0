@@ -1,0 +1,57 @@
+cmd/worker/main.go
+  s_5d9bfbef63e3a1::t_7da15b2eb566c7 1-192
+internal/controller/managed.go
+  s_5d9bfbef63e3a1::t_fe04aaf9e5b108 1-523
+internal/controller/recovery_integration_test.go
+  s_5d9bfbef63e3a1::t_b26fc4149ac563 1-913
+internal/controller/worker_kill_chaos_test.go
+  s_5d9bfbef63e3a1::t_0aa3172acc6003 1-324
+internal/domain/receipt.go
+  s_5d9bfbef63e3a1::t_f438a0201714ef 1-82
+internal/domain/reducer.go
+  s_5d9bfbef63e3a1::t_9e92bf7da7b296 167-184,377-619,698-702,705-709,712-716,719-723,726-731,742,754-755
+internal/domain/types.go
+  s_5d9bfbef63e3a1::t_7ac032da7ab6a7 80-96,133-135,144-159,194-216
+internal/lease/lease.go
+  s_5d9bfbef63e3a1::t_1be44fbd7b3bd0 1-112
+internal/lease/postgres.go
+  s_5d9bfbef63e3a1::t_95d4b4468ef9d8 1-727
+internal/lease/postgres_integration_test.go
+  s_5d9bfbef63e3a1::t_e838aeaaebea10 1-688
+internal/migration/migration.go
+  s_5d9bfbef63e3a1::t_7e8306dfd98ca2 16-41,43,47,52,54
+internal/migration/migration_integration_test.go
+  s_5d9bfbef63e3a1::t_ad104de259f98e 114-340
+internal/store/artifact.go
+  s_5d9bfbef63e3a1::t_3dd0f825e3dec4 13-14,132,142-160,176-274
+internal/store/postgres.go
+  s_5d9bfbef63e3a1::t_fbedf6c44c7c0a 190,215-223,232-239,262-273,314-317,370-573
+internal/worker/worker_test.go
+  s_5d9bfbef63e3a1::t_4f7afdca262e7a 1-305
+migrations/000003_phase3_workers_receipts.down.sql
+  s_5d9bfbef63e3a1::t_b4349f9f70ef87 1-8
+migrations/000003_phase3_workers_receipts.up.sql
+  s_5d9bfbef63e3a1::t_9dd18496a4dd83 1-46
+migrations/000005_phase3_receipt_artifact_digest.down.sql
+  s_5d9bfbef63e3a1::t_c17ba5c45e2236 1-7
+migrations/000005_phase3_receipt_artifact_digest.up.sql
+  s_5d9bfbef63e3a1::t_11168c76259b95 1-21
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "d9341f2b39de4f84e11aadb5a5f0229929c529d0",
+  "prompts": {},
+  "sessions": {
+    "s_5d9bfbef63e3a1": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fb2e9-32aa-78f1-84f8-1817db09de22",
+        "model": "unknown"
+      },
+      "human_author": "yaozhiyuan.123 <yaozhiyuan.123@bytedance.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
