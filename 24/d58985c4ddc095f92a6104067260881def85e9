@@ -1,0 +1,57 @@
+README.md
+  s_5d9bfbef63e3a1::t_83edfcad0e860c 75-83
+cmd/agentdock/postgres_integration_test.go
+  s_5d9bfbef63e3a1::t_b82d598fd74c56 6,8,16,18-20,74-366,392,410-423
+docs/architecture.md
+  s_5d9bfbef63e3a1::t_c3536727df15ad 105-123
+docs/demo.md
+  s_5d9bfbef63e3a1::t_92cc01cea6da5f 47-54
+docs/event-model.md
+  s_5d9bfbef63e3a1::t_197e5d6eafdabc 91-109
+docs/state-machine.md
+  s_5d9bfbef63e3a1::t_2414e19cbff173 91-94
+docs/threat-model.md
+  s_5d9bfbef63e3a1::t_0059d9df4e5239 48,88-90
+internal/cli/cli.go
+  s_5d9bfbef63e3a1::t_442b7e5e55522c 5,141-142,146-148
+internal/controller/controller.go
+  s_5d9bfbef63e3a1::t_d4b779029343b5 15-17,142-161
+internal/domain/action_recovery_test.go
+  s_5d9bfbef63e3a1::t_d141bb9c79f004 4,93-183
+internal/domain/reducer.go
+  s_5d9bfbef63e3a1::t_9d6bab858ea233 140-148,338-364
+internal/lease/lease.go
+  s_5d9bfbef63e3a1::t_b20de902a47b35 13-21
+internal/lease/postgres.go
+  s_4ee32097a9f78e::t_2f76369f9c67c2 159-170,543-601
+internal/store/postgres.go
+  s_5d9bfbef63e3a1::t_fff2110571b6e5 163-184,237-259,263,268-275,288,437-463
+internal/store/store.go
+  s_5d9bfbef63e3a1::t_2d4f23a9e41d18 20,86-92,95
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "24d58985c4ddc095f92a6104067260881def85e9",
+  "prompts": {},
+  "sessions": {
+    "s_4ee32097a9f78e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fb67b-d9d9-7331-bed1-458ae511b8a9",
+        "model": "unknown"
+      },
+      "human_author": "yaozhiyuan.123 <yaozhiyuan.123@bytedance.com>"
+    },
+    "s_5d9bfbef63e3a1": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fb2e9-32aa-78f1-84f8-1817db09de22",
+        "model": "unknown"
+      },
+      "human_author": "yaozhiyuan.123 <yaozhiyuan.123@bytedance.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
