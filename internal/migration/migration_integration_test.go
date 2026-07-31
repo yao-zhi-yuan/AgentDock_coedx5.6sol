@@ -189,6 +189,88 @@ func TestPhase3MigrationAddsWorkersReceiptsAndFencingConstraints(t *testing.T) {
 	}
 }
 
+func TestPhase3ReceiptArtifactRequiresDigestAtInsert(t *testing.T) {
+	ctx := context.Background()
+	schema := newSchemaName("phase3_receipt_digest")
+	dsn := schemaDatabaseURL(t, ctx, schema)
+	t.Cleanup(func() { dropSchema(t, ctx, schema) })
+	if err := migration.Up(dsn, filepath.Join("..", "..", "migrations")); err != nil {
+		t.Fatalf("Up(empty schema) error = %v", err)
+	}
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("pgxpool.New() error = %v", err)
+	}
+	defer pool.Close()
+
+	const (
+		runID      = "receipt-digest-run"
+		workerID   = "receipt-digest-worker"
+		artifactID = "receipt-digest-artifact"
+		digest     = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	)
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO runs (
+			run_id, scenario_id, spec_hash, desired_state, observed_state
+		) VALUES ($1, 'receipt-digest', 'phase-3', 'Running', 'Acting')`,
+		runID,
+	); err != nil {
+		t.Fatalf("seed Run: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO workers (worker_id) VALUES ($1)`,
+		workerID,
+	); err != nil {
+		t.Fatalf("seed Worker: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO artifacts (
+			artifact_id, run_id, artifact_type, digest, path, size
+		) VALUES ($1, $2, 'phase3.action-receipt', $3, '/tmp/receipt-digest-artifact', 1)`,
+		artifactID,
+		runID,
+		digest,
+	); err != nil {
+		t.Fatalf("seed Artifact: %v", err)
+	}
+
+	_, err = pool.Exec(ctx, `
+		INSERT INTO action_receipts (
+			receipt_id, run_id, action_id, action_type, idempotency_scope,
+			output, artifact_id, cost_units, worker_id, fencing_token
+		) VALUES (
+			'missing-digest', $1, 'action-missing-digest', 'ApplyPatch',
+			'scoped-idempotent', '{}', $2, 1, $3, 1
+		)`,
+		runID,
+		artifactID,
+		workerID,
+	)
+	if err == nil {
+		t.Fatal("Artifact-backed Receipt without artifact_digest was inserted")
+	}
+	if !strings.Contains(err.Error(), "action_receipts_artifact_digest_pair") {
+		t.Fatalf("missing Artifact digest insert error = %v, want digest-pair constraint", err)
+	}
+
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO action_receipts (
+			receipt_id, run_id, action_id, action_type, idempotency_scope,
+			output, artifact_id, artifact_digest, cost_units, worker_id,
+			fencing_token
+		) VALUES (
+			'paired-digest', $1, 'action-paired-digest', 'ApplyPatch',
+			'scoped-idempotent', '{}', $2, $3, 1, $4, 1
+		)`,
+		runID,
+		artifactID,
+		digest,
+		workerID,
+	); err != nil {
+		t.Fatalf("insert Artifact-backed Receipt with digest: %v", err)
+	}
+}
+
 func TestPhase3UpgradePreservesPhase2DataAndRoundTripsDownUp(t *testing.T) {
 	ctx := context.Background()
 	schema := newSchemaName("phase3_upgrade")
@@ -261,6 +343,44 @@ func TestPhase3UpgradePreservesPhase2DataAndRoundTripsDownUp(t *testing.T) {
 	}
 	assertMigrationVersion(t, ctx, pool, 5)
 	assertPhase2UpgradeData(t, ctx, pool, runID, attemptID, artifactID, workerID)
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO action_receipts (
+			receipt_id, run_id, action_id, action_type, idempotency_scope,
+			output, artifact_id, cost_units, worker_id, fencing_token
+		) VALUES (
+			'phase5-null-artifact-digest', $1, 'phase5-action', 'ApplyPatch',
+			'scoped-idempotent', '{}', $2, 1, $3, 7
+		)`,
+		runID,
+		artifactID,
+		workerID,
+	); err != nil {
+		t.Fatalf("seed version 5 Receipt without Artifact digest: %v", err)
+	}
+	if err := migration.To(dsn, path, 6); err != nil {
+		t.Fatalf("upgrade version 5 to 6: %v", err)
+	}
+	assertMigrationVersion(t, ctx, pool, 6)
+	var receiptArtifactDigest, artifactDigest string
+	if err := pool.QueryRow(ctx, `
+		SELECT receipts.artifact_digest, artifacts.digest
+		FROM action_receipts receipts
+		JOIN artifacts ON artifacts.artifact_id = receipts.artifact_id
+		WHERE receipts.receipt_id = 'phase5-null-artifact-digest'`,
+	).Scan(&receiptArtifactDigest, &artifactDigest); err != nil {
+		t.Fatalf("query version 6 Receipt Artifact digest: %v", err)
+	}
+	if receiptArtifactDigest != artifactDigest {
+		t.Fatalf(
+			"version 6 backfill Artifact digest = %q, want %q",
+			receiptArtifactDigest,
+			artifactDigest,
+		)
+	}
+	if err := migration.To(dsn, path, 5); err != nil {
+		t.Fatalf("down version 6 to 5: %v", err)
+	}
+	assertMigrationVersion(t, ctx, pool, 5)
 	if err := migration.To(dsn, path, 4); err != nil {
 		t.Fatalf("down version 5 to 4: %v", err)
 	}
@@ -274,10 +394,10 @@ func TestPhase3UpgradePreservesPhase2DataAndRoundTripsDownUp(t *testing.T) {
 	}
 	assertMigrationVersion(t, ctx, pool, 2)
 	assertPhase2UpgradeData(t, ctx, pool, runID, attemptID, artifactID, "")
-	if err := migration.To(dsn, path, 5); err != nil {
-		t.Fatalf("re-up version 2 to 5: %v", err)
+	if err := migration.To(dsn, path, 6); err != nil {
+		t.Fatalf("re-up version 2 to 6: %v", err)
 	}
-	assertMigrationVersion(t, ctx, pool, 5)
+	assertMigrationVersion(t, ctx, pool, 6)
 	assertPhase2UpgradeData(t, ctx, pool, runID, attemptID, artifactID, workerID)
 }
 

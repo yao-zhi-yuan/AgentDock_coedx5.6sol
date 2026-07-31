@@ -61,12 +61,14 @@ func run(args []string) int {
 		return 1
 	}
 	defer eventStore.Close()
+	fmt.Printf("event_store_ready worker=%s run=%s\n", *workerID, *runID)
 	manager, err := lease.NewPostgresManager(ctx, *databaseURL)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
 	defer manager.Close()
+	fmt.Printf("lease_manager_ready worker=%s run=%s\n", *workerID, *runID)
 	if *staleTokenProbe > 0 {
 		presented := lease.Lease{
 			RunID:        *runID,

@@ -3,7 +3,6 @@
 package controller_test
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"errors"
@@ -72,7 +71,14 @@ func TestWorkerKillChaos100Converges(t *testing.T) {
 			8*time.Millisecond,
 			200*time.Millisecond,
 		)
-		waitForLeaseOwner(t, manager, runID, workerA, 2*time.Second)
+		waitForLeaseOwner(
+			t,
+			manager,
+			runID,
+			workerA,
+			first,
+			workerTestStartupTimeout,
+		)
 		// Six actions each have an 8 ms pre-execution delay and an 8 ms
 		// post-execution/pre-Receipt delay. ApplyPatch adds a 200 ms window
 		// after Artifact publication and before Receipt persistence. The
@@ -80,10 +86,10 @@ func TestWorkerKillChaos100Converges(t *testing.T) {
 		// window while remaining shorter than a clean run. Deterministic
 		// integration tests cover the complete seven-window matrix.
 		time.Sleep(time.Duration(random.Intn(270)+1) * time.Millisecond)
-		if err := first.Process.Kill(); err != nil {
+		if err := first.command.Process.Kill(); err != nil {
 			t.Fatalf("iteration %d kill Worker A: %v\noutput:\n%s", iteration, err, firstOutput.String())
 		}
-		if err := first.Wait(); err == nil {
+		if err := first.wait(); err == nil {
 			t.Fatalf("iteration %d killed Worker A returned nil error", iteration)
 		}
 		if chaosArtifactExistsAfterKill(t, ctx, manager, artifactReader, operator, runID) {
@@ -102,7 +108,7 @@ func TestWorkerKillChaos100Converges(t *testing.T) {
 			0,
 			0,
 		)
-		waitCommand(t, second, 4*time.Second, func(err error) {
+		waitCommand(t, second, workerTestStartupTimeout+2*time.Second, func(err error) {
 			if err != nil {
 				t.Fatalf(
 					"iteration %d replacement Worker error = %v\nfirst:\n%s\nsecond:\n%s",
@@ -156,7 +162,7 @@ func buildChaosWorker(t *testing.T) string {
 	target := filepath.Join(t.TempDir(), "agentdock-worker")
 	command := exec.Command("go", "build", "-o", target, "./cmd/worker")
 	command.Dir = root
-	command.Env = append(os.Environ(), "GOCACHE=/private/tmp/agentdock-go-cache")
+	command.Env = os.Environ()
 	output, err := command.CombinedOutput()
 	if err != nil {
 		t.Fatalf("build Worker binary: %v\n%s", err, output)
@@ -174,7 +180,7 @@ func startChaosWorker(
 	ttl time.Duration,
 	actionDelay time.Duration,
 	artifactReceiptDelay time.Duration,
-) (*exec.Cmd, *bytes.Buffer) {
+) (*testWorkerProcess, *synchronizedBuffer) {
 	t.Helper()
 	command := exec.Command(
 		binary,
@@ -189,19 +195,7 @@ func startChaosWorker(
 		"--post-action-delay", actionDelay.String(),
 		"--artifact-receipt-delay", artifactReceiptDelay.String(),
 	)
-	output := &bytes.Buffer{}
-	command.Stdout = output
-	command.Stderr = output
-	if err := command.Start(); err != nil {
-		t.Fatalf("start Worker %s: %v", workerID, err)
-	}
-	t.Cleanup(func() {
-		if command.ProcessState == nil {
-			_ = command.Process.Kill()
-			_, _ = command.Process.Wait()
-		}
-	})
-	return command, output
+	return startTestWorkerProcess(t, command)
 }
 
 func chaosArtifactExistsAfterKill(
@@ -248,32 +242,60 @@ func waitForLeaseOwner(
 	manager lease.Manager,
 	runID string,
 	workerID string,
+	process *testWorkerProcess,
 	timeout time.Duration,
 ) lease.Lease {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		current, err := manager.Current(context.Background(), runID)
+	waitCtx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	var lastErr error
+	for {
+		current, err := manager.Current(waitCtx, runID)
 		if err == nil && current.WorkerID == workerID && current.ExpiresAt.After(time.Now().UTC()) {
 			return current
 		}
-		time.Sleep(2 * time.Millisecond)
+		lastErr = err
+		select {
+		case <-process.done:
+			t.Fatalf(
+				"Worker %s exited before acquiring Run %s: %s",
+				workerID,
+				runID,
+				process.diagnostics(lastErr),
+			)
+		case <-waitCtx.Done():
+			t.Fatalf(
+				"Run %s was not leased by %s within %s: %s",
+				runID,
+				workerID,
+				timeout,
+				process.diagnostics(lastErr),
+			)
+		case <-ticker.C:
+		}
 	}
-	t.Fatalf("Run %s was not leased by %s within %s", runID, workerID, timeout)
-	return lease.Lease{}
 }
 
-func waitCommand(t *testing.T, command *exec.Cmd, timeout time.Duration, check func(error)) {
+func waitCommand(
+	t *testing.T,
+	process *testWorkerProcess,
+	timeout time.Duration,
+	check func(error),
+) {
 	t.Helper()
-	result := make(chan error, 1)
-	go func() { result <- command.Wait() }()
 	select {
-	case err := <-result:
-		check(err)
+	case <-process.done:
+		check(process.wait())
 	case <-time.After(timeout):
-		_ = command.Process.Kill()
-		<-result
-		t.Fatalf("command timed out after %s", timeout)
+		_ = process.command.Process.Kill()
+		<-process.done
+		t.Fatalf(
+			"command timed out after %s: %s",
+			timeout,
+			process.diagnostics(nil),
+		)
 	}
 }
 

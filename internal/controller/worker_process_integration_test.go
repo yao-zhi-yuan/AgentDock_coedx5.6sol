@@ -42,8 +42,8 @@ func TestPauseResumeCancelAcrossWorkerProcesses(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateRun(pause) error = %v", err)
 	}
-	process, output := startIntegrationWorker(t, binary, dsn, pauseWorkerID, pauseRunID, 30*time.Millisecond)
-	waitForIntegrationLease(t, manager, pauseRunID, pauseWorkerID, 2*time.Second)
+	process, _ := startIntegrationWorker(t, binary, dsn, pauseWorkerID, pauseRunID, 30*time.Millisecond)
+	waitForIntegrationLease(t, manager, pauseRunID, pauseWorkerID, process, workerTestStartupTimeout)
 	paused, err := operator.SetDesiredState(ctx, pauseRunID, domain.DesiredPaused)
 	if err != nil {
 		t.Fatalf("SetDesiredState(Paused) error = %v", err)
@@ -82,7 +82,7 @@ func TestPauseResumeCancelAcrossWorkerProcesses(t *testing.T) {
 	if _, err := operator.SetDesiredState(ctx, pauseRunID, domain.DesiredRunning); err != nil {
 		t.Fatalf("SetDesiredState(Running) error = %v", err)
 	}
-	waitIntegrationCommand(t, process, output, 4*time.Second)
+	waitIntegrationCommand(t, process, 4*time.Second)
 	pauseFinal, err := operator.GetRun(ctx, pauseRunID)
 	if err != nil {
 		t.Fatalf("GetRun(pause final) error = %v", err)
@@ -98,7 +98,7 @@ func TestPauseResumeCancelAcrossWorkerProcesses(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateRun(cancel) error = %v", err)
 	}
-	cancelProcess, cancelOutput := startIntegrationWorker(
+	cancelProcess, _ := startIntegrationWorker(
 		t,
 		binary,
 		dsn,
@@ -106,11 +106,18 @@ func TestPauseResumeCancelAcrossWorkerProcesses(t *testing.T) {
 		cancelRunID,
 		30*time.Millisecond,
 	)
-	waitForIntegrationLease(t, manager, cancelRunID, cancelWorkerID, 2*time.Second)
+	waitForIntegrationLease(
+		t,
+		manager,
+		cancelRunID,
+		cancelWorkerID,
+		cancelProcess,
+		workerTestStartupTimeout,
+	)
 	if _, err := operator.SetDesiredState(ctx, cancelRunID, domain.DesiredCancelled); err != nil {
 		t.Fatalf("SetDesiredState(Cancelled) error = %v", err)
 	}
-	waitIntegrationCommand(t, cancelProcess, cancelOutput, 4*time.Second)
+	waitIntegrationCommand(t, cancelProcess, 4*time.Second)
 	cancelFinal, err := operator.GetRun(ctx, cancelRunID)
 	if err != nil {
 		t.Fatalf("GetRun(cancel final) error = %v", err)
@@ -153,8 +160,15 @@ func TestTwoWorkerKillTakeoverRejectsRestartedStaleToken(t *testing.T) {
 		120*time.Millisecond,
 		100*time.Millisecond,
 	)
-	oldLease := waitForIntegrationLease(t, manager, runID, workerA, 2*time.Second)
-	second, secondOutput := startIntegrationWorkerWithTTL(
+	oldLease := waitForIntegrationLease(
+		t,
+		manager,
+		runID,
+		workerA,
+		first,
+		workerTestStartupTimeout,
+	)
+	second, _ := startIntegrationWorkerWithTTL(
 		t,
 		binary,
 		dsn,
@@ -163,13 +177,13 @@ func TestTwoWorkerKillTakeoverRejectsRestartedStaleToken(t *testing.T) {
 		500*time.Millisecond,
 		20*time.Millisecond,
 	)
-	waitForWorkerRegistration(t, manager, workerB, 2*time.Second)
-	if err := first.Process.Kill(); err != nil {
+	waitForWorkerRegistration(t, manager, workerB, second, workerTestStartupTimeout)
+	if err := first.command.Process.Kill(); err != nil {
 		t.Fatalf("kill Worker A: %v\n%s", err, firstOutput.String())
 	}
-	_ = first.Wait()
+	_ = first.wait()
 
-	newLease := waitForIntegrationLease(t, manager, runID, workerB, 3*time.Second)
+	newLease := waitForIntegrationLease(t, manager, runID, workerB, second, 3*time.Second)
 	if newLease.FencingToken <= oldLease.FencingToken {
 		t.Fatalf("new token=%d old token=%d", newLease.FencingToken, oldLease.FencingToken)
 	}
@@ -187,7 +201,7 @@ func TestTwoWorkerKillTakeoverRejectsRestartedStaleToken(t *testing.T) {
 	if !bytes.Contains(probeOutput, []byte("stale_probe_rejected")) {
 		t.Fatalf("restart Worker A stale-token probe output = %q", probeOutput)
 	}
-	waitIntegrationCommand(t, second, secondOutput, 4*time.Second)
+	waitIntegrationCommand(t, second, 4*time.Second)
 	final, err := operator.GetRun(ctx, runID)
 	if err != nil {
 		t.Fatalf("GetRun(final) error = %v", err)
@@ -229,24 +243,24 @@ func TestWorkerHeartbeatsWhileWaitingForHeldLease(t *testing.T) {
 	if _, err := manager.Register(ctx, holderID); err != nil {
 		t.Fatalf("Register(holder) error = %v", err)
 	}
-	if _, err := manager.Acquire(ctx, runID, holderID, 2*time.Second); err != nil {
+	if _, err := manager.Acquire(
+		ctx,
+		runID,
+		holderID,
+		workerTestStartupTimeout+2*time.Second,
+	); err != nil {
 		t.Fatalf("Acquire(holder) error = %v", err)
 	}
-	waiter, waiterOutput := startIntegrationWorkerWithTTLAndPoll(
+	waiter, _ := startIntegrationWorkerWithTTLAndPoll(
 		t, binary, dsn, waiterID, runID, 200*time.Millisecond, 0, time.Second,
 	)
-	deadline := time.Now().Add(2 * time.Second)
-	var registered lease.Worker
-	for time.Now().Before(deadline) {
-		registered, err = manager.LookupWorker(ctx, waiterID)
-		if err == nil {
-			break
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
-	if err != nil {
-		t.Fatalf("LookupWorker(waiter registration) error = %v\n%s", err, waiterOutput.String())
-	}
+	registered := waitForWorkerRegistration(
+		t,
+		manager,
+		waiterID,
+		waiter,
+		workerTestStartupTimeout,
+	)
 	heartbeatDeadline := time.Now().Add(500 * time.Millisecond)
 	var heartbeat lease.Worker
 	for time.Now().Before(heartbeatDeadline) {
@@ -258,17 +272,17 @@ func TestWorkerHeartbeatsWhileWaitingForHeldLease(t *testing.T) {
 	}
 	if err != nil || !heartbeat.HeartbeatAt.After(registered.HeartbeatAt) {
 		t.Fatalf(
-			"waiting Worker heartbeat did not advance: registered=%s heartbeat=%s err=%v\n%s",
+			"waiting Worker heartbeat did not advance: registered=%s heartbeat=%s err=%v; %s",
 			registered.HeartbeatAt,
 			heartbeat.HeartbeatAt,
 			err,
-			waiterOutput.String(),
+			waiter.diagnostics(err),
 		)
 	}
-	if err := waiter.Process.Kill(); err != nil {
-		t.Fatalf("kill waiting Worker: %v", err)
+	if err := waiter.command.Process.Kill(); err != nil {
+		t.Fatalf("kill waiting Worker: %v; %s", err, waiter.diagnostics(nil))
 	}
-	_ = waiter.Wait()
+	_ = waiter.wait()
 }
 
 func buildIntegrationWorker(t *testing.T) string {
@@ -280,7 +294,7 @@ func buildIntegrationWorker(t *testing.T) string {
 	target := filepath.Join(t.TempDir(), "agentdock-worker")
 	command := exec.Command("go", "build", "-o", target, "./cmd/worker")
 	command.Dir = root
-	command.Env = append(os.Environ(), "GOCACHE=/private/tmp/agentdock-go-cache")
+	command.Env = os.Environ()
 	output, err := command.CombinedOutput()
 	if err != nil {
 		t.Fatalf("build Worker binary: %v\n%s", err, output)
@@ -295,7 +309,7 @@ func startIntegrationWorker(
 	workerID string,
 	runID string,
 	actionDelay time.Duration,
-) (*exec.Cmd, *bytes.Buffer) {
+) (*testWorkerProcess, *synchronizedBuffer) {
 	t.Helper()
 	return startIntegrationWorkerWithTTL(
 		t,
@@ -316,7 +330,7 @@ func startIntegrationWorkerWithTTL(
 	runID string,
 	ttl time.Duration,
 	actionDelay time.Duration,
-) (*exec.Cmd, *bytes.Buffer) {
+) (*testWorkerProcess, *synchronizedBuffer) {
 	return startIntegrationWorkerWithTTLAndPoll(
 		t,
 		binary,
@@ -338,7 +352,7 @@ func startIntegrationWorkerWithTTLAndPoll(
 	ttl time.Duration,
 	actionDelay time.Duration,
 	poll time.Duration,
-) (*exec.Cmd, *bytes.Buffer) {
+) (*testWorkerProcess, *synchronizedBuffer) {
 	t.Helper()
 	command := exec.Command(
 		binary,
@@ -350,19 +364,7 @@ func startIntegrationWorkerWithTTLAndPoll(
 		"--poll", poll.String(),
 		"--action-delay", actionDelay.String(),
 	)
-	output := &bytes.Buffer{}
-	command.Stdout = output
-	command.Stderr = output
-	if err := command.Start(); err != nil {
-		t.Fatalf("start Worker %s: %v", workerID, err)
-	}
-	t.Cleanup(func() {
-		if command.ProcessState == nil {
-			_ = command.Process.Kill()
-			_, _ = command.Process.Wait()
-		}
-	})
-	return command, output
+	return startTestWorkerProcess(t, command)
 }
 
 func waitForIntegrationLease(
@@ -370,57 +372,98 @@ func waitForIntegrationLease(
 	manager lease.Manager,
 	runID string,
 	workerID string,
+	process *testWorkerProcess,
 	timeout time.Duration,
 ) lease.Lease {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		current, err := manager.Current(context.Background(), runID)
+	waitCtx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	var lastErr error
+	for {
+		current, err := manager.Current(waitCtx, runID)
 		if err == nil && current.WorkerID == workerID && current.ExpiresAt.After(time.Now().UTC()) {
 			return current
 		}
-		time.Sleep(2 * time.Millisecond)
+		lastErr = err
+		select {
+		case <-process.done:
+			t.Fatalf(
+				"Worker exited before acquiring Run %s: %s",
+				runID,
+				process.diagnostics(lastErr),
+			)
+		case <-waitCtx.Done():
+			t.Fatalf(
+				"Run %s was not leased by %s within %s: %s",
+				runID,
+				workerID,
+				timeout,
+				process.diagnostics(lastErr),
+			)
+		case <-ticker.C:
+		}
 	}
-	t.Fatalf("Run %s was not leased by %s within %s", runID, workerID, timeout)
-	return lease.Lease{}
 }
 
 func waitForWorkerRegistration(
 	t *testing.T,
 	manager lease.Manager,
 	workerID string,
+	process *testWorkerProcess,
 	timeout time.Duration,
 ) lease.Worker {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		worker, err := manager.LookupWorker(context.Background(), workerID)
+	waitCtx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	var lastErr error
+	for {
+		worker, err := manager.LookupWorker(waitCtx, workerID)
 		if err == nil {
 			return worker
 		}
-		time.Sleep(2 * time.Millisecond)
+		lastErr = err
+		select {
+		case <-process.done:
+			t.Fatalf(
+				"Worker %s exited before registration: %s",
+				workerID,
+				process.diagnostics(lastErr),
+			)
+		case <-waitCtx.Done():
+			t.Fatalf(
+				"Worker %s was not registered within %s: %s",
+				workerID,
+				timeout,
+				process.diagnostics(lastErr),
+			)
+		case <-ticker.C:
+		}
 	}
-	t.Fatalf("Worker %s was not registered within %s", workerID, timeout)
-	return lease.Worker{}
 }
 
 func waitIntegrationCommand(
 	t *testing.T,
-	command *exec.Cmd,
-	output *bytes.Buffer,
+	process *testWorkerProcess,
 	timeout time.Duration,
 ) {
 	t.Helper()
-	result := make(chan error, 1)
-	go func() { result <- command.Wait() }()
 	select {
-	case err := <-result:
+	case <-process.done:
+		err := process.wait()
 		if err != nil {
-			t.Fatalf("Worker process error = %v\n%s", err, output.String())
+			t.Fatalf("Worker process error: %s", process.diagnostics(nil))
 		}
 	case <-time.After(timeout):
-		_ = command.Process.Kill()
-		<-result
-		t.Fatalf("Worker process timed out after %s\n%s", timeout, output.String())
+		_ = process.command.Process.Kill()
+		<-process.done
+		t.Fatalf(
+			"Worker process timed out after %s: %s",
+			timeout,
+			process.diagnostics(nil),
+		)
 	}
 }

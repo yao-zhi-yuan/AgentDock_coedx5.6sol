@@ -212,8 +212,9 @@ func (controller *Controller) recoverPendingAction(
 		if err := appendEvent(actionFailedEvent(command, "cancel intent superseded the pending action", domain.ActionOutcomeFailed)); err != nil {
 			return ReconcileResult{}, err
 		}
-		result.State, _ = controller.GetRun(ctx, state.Run.ID)
-		return result, nil
+		var err error
+		result.State, err = controller.GetRun(ctx, state.Run.ID)
+		return result, err
 	}
 
 	receipt, err := controller.leaseManager.LookupReceipt(ctx, state.Run.ID, state.PendingActionID)

@@ -3,12 +3,18 @@
 - Implementation date: 2026-07-30
 - Pre-remediation host verification date: 2026-07-31
 - External Gate 3 remediation date: 2026-07-31
+- Stability/schema remediation verification date: 2026-07-31
 - Branch: `codex/agentdock-verify`
 - Gate 2 baseline: `898b876ebbf919acd11b99b886bd931f4b6ecffa`
 - Phase-3 implementation commit:
   `d9341f2b39de4f84e11aadb5a5f0229929c529d0`
   (`feat: add lease fencing and crash recovery`)
-- Gate-3 remediation increment: this unpublished follow-up commit
+- First Gate-3 remediation commit:
+  `24d58985c4ddc095f92a6104067260881def85e9`
+  (`fix: enforce fencing across managed mode transition`), parent `d9341f2`
+- Stability/schema remediation: the follow-up commit containing this report,
+  with parent `24d58985c4ddc095f92a6104067260881def85e9`;
+  proposed subject `fix: stabilize worker gates and receipt constraints`
 - Construction contract: repository-root `AgentDock-Verify-施工计划.md`
 
 ## Scope
@@ -195,6 +201,65 @@ were not counted as acceptance:
       proves no Lease exists during the old external action, old Reconcile
       completes normally, and only the subsequent Acquire selects managed
       mode.
+15. Root Gate Worker-registration stability failure:
+    - After a second external blank review closed the fencing bypass with
+      **Critical 0 / Important 0**, the root controller reran the required
+      package combination with a fresh cache. `internal/lease` passed, but
+      `internal/controller` exited 1 because
+      `TestWorkerHeartbeatsWhileWaitingForHeldLease` did not observe the
+      waiter registration inside two seconds. The test reported only
+      `worker not registered`; its child output was empty.
+    - The pre-fix test only polled PostgreSQL. It neither observed child
+      process exit nor synchronized concurrent process output, so the failure
+      could not distinguish slow startup/connection establishment from an
+      already failed Worker. Its held Lease also expired at the same two-second
+      boundary as the startup assertion.
+    - The exact root command and the same package combination with
+      `-count=10` subsequently passed before any fix. Those successes do not
+      erase the root failure; they support a non-deterministic startup
+      observation problem, but the original unsynchronized evidence cannot
+      identify the exact delayed or failed step.
+    - Fix: integration Worker helpers now own one Wait goroutine and expose a
+      close-only exit signal, captured Wait error, process state, PID,
+      synchronized stdout/stderr, and last database error. Registration and
+      Lease readiness wait on a bounded five-second startup context or fail
+      immediately on process exit. The five-second budget covers two
+      PostgreSQL pool opens/pings under package/Race load; the holder TTL is
+      seven seconds so it cannot expire at the readiness boundary. Worker
+      builds inherit the Gate's `GOCACHE` instead of sharing a hidden global
+      test cache. Non-secret `event_store_ready` and `lease_manager_ready`
+      markers distinguish the two database setup steps from Worker
+      registration in captured output.
+16. Receipt Artifact digest SQL NULL blind spot:
+    - The second external review's schema Minor found that migration 000005's
+      CHECK accepted `artifact_id IS NOT NULL, artifact_digest IS NULL`
+      because SQL CHECK treats NULL as non-false.
+    - Red command:
+      `go test -tags=integration -count=1 -v ./internal/migration -run TestPhase3ReceiptArtifactRequiresDigestAtInsert`.
+      Exit: 1 with `Artifact-backed Receipt without artifact_digest was
+      inserted`.
+    - Fix: new migration 000006 backfills any such row from its referenced
+      Artifact, then replaces the existing named constraint with an explicit
+      `artifact_digest IS NOT NULL` branch. It does not rewrite migration
+      000005. The test performs a real invalid INSERT and a valid paired
+      INSERT.
+    - The identical test plus the exact-version round trip exited 0 and covered
+      `2→6→5→4→3→2→6`.
+17. Full-range review found the same startup flaw in Chaos:
+    - The first current full-range review reported
+      **Critical 0 / Important 1 / Minor 1; Ready: No** because the required
+      100-Kill Chaos harness still used a two-second database-only Lease poll,
+      unsynchronized output, and separate `Wait` ownership. Any one of 100
+      Workers could hit the same unclassified startup failure.
+    - Fix: a shared `integration || chaos` test helper now owns the single
+      Wait goroutine, exit signal, synchronized output, process diagnostics,
+      and cleanup for both suites. Chaos Lease readiness uses the same
+      exit-aware five-second context, and replacement completion allows that
+      bounded startup budget plus two seconds. It remains a real Worker process
+      and real PostgreSQL test.
+    - The review's Minor found one discarded `GetRun` error after a pending
+      action was cancelled. That reload error is now returned instead of
+      reporting success with an invalid zero State.
 
 Before applying migration 000004 to the long-lived local development database,
 117 obsolete synthetic phase-3 red/early-green Receipt rows referenced fake
@@ -209,8 +274,10 @@ The corresponding focused commands were rerun after each fix and exited 0.
 1. Added `workers` and `action_receipts` migrations, Worker foreign-key
    ownership for Leases, Receipt-to-Artifact foreign-key ownership, expiry
    indexes, per-Run/action Receipt uniqueness, and unique non-null Artifact
-   accounting. Migration 000005 adds paired Artifact digests; the exact-version
-   migration harness proves v2 data preservation and full down/up reversibility.
+   accounting. Migration 000005 adds paired Artifact digests; migration 000006
+   closes the SQL NULL CHECK gap without rewriting applied history. The
+   exact-version migration harness proves v2 data preservation and full
+   `2→6→5→4→3→2→6` reversibility.
 2. Added Worker registration and database-time heartbeat on an independent
    process ticker, including while Lease polling is slow or blocked.
    Worker IDs are non-reusable process-incarnation identities; duplicate
@@ -423,6 +490,31 @@ initial Acquire interleaving, advisory/Lease/Run lock order, Worker polling,
 all production Event/Receipt write entrances, operator desired-state
 exception, Receipt/Artifact evidence, and phase-4 boundary.
 
+The second external blank review of commit `24d58985` then reported
+**Critical 0 / Important 0 / Minor 2**: both fencing Criticals were closed, but
+it noted the migration 000005 SQL NULL blind spot and status provenance. Before
+those Minors could be treated as non-blocking, the root controller's independent
+`verification-before-completion` run found the Worker-registration stability
+failure in red evidence item 15 and classified it as an Important Gate failure.
+Therefore the prior internal PASS below was revoked. The current stability and
+schema fixes received two new read-only reviews:
+
+- the remediation-increment review initially reported
+  **Critical 0 / Important 0 / Minor 1** for overly strong root-cause wording
+  in this status report; after it was corrected, the follow-up reported
+  **Critical 0 / Important 0 / Minor 0; Ready: Yes**;
+- the complete `898b876e..working-tree` review initially reported
+  **Critical 0 / Important 1 / Minor 1** for the same fragile process-wait
+  pattern in the Chaos harness and a discarded `GetRun` error after Cancel;
+  after both fixes, the follow-up reported
+  **Critical 0 / Important 0 / Minor 0; Ready: Yes**.
+
+Both final reviews checked the shared single-`Wait` process helper, bounded
+exit-aware readiness, synchronized diagnostics, real cross-process Chaos,
+migration 000006 and its INSERT/round-trip tests, managed-mode fencing, and
+the phase-4 boundary. They were read-only and are not a substitute for the
+external blank-task Gatekeeper.
+
 ## Pre-remediation automatic acceptance
 
 All commands below were executed before the external Critical was reported.
@@ -494,10 +586,12 @@ action_receipts_artifact_fk|f|true
 Final whitespace, scope, review, parent, commit, and clean-worktree checks are
 performed after this document is finalized.
 
-## Post-remediation final automatic acceptance
+## Pre-stability-remediation automatic acceptance
 
-All results in this section were freshly produced from the final remediation
-code on 2026-07-31. They do not reuse the pre-remediation table.
+These results were produced from commit `24d58985` before the root controller
+found the Worker-registration flake and the schema blind spot was fixed. They
+are retained as provenance only and are not accepted as evidence for the
+current remediation.
 
 ### Required phase-3 Gate and managed-mode regressions
 
@@ -561,11 +655,108 @@ The focused PostgreSQL regressions assert:
 | `git diff --check` before status finalization | 0 | no whitespace errors |
 | plan/scope/VCS pre-commit check | 0 | branch correct; HEAD `d9341f2`, parent `898b876e`; construction plan unchanged |
 
+## Current stability/schema focused verification
+
+These are focused red→green and stress results from the remediation before its
+complete fresh Gate. They complement, rather than replace, the final acceptance
+section below.
+
+| Command | Exit | Key evidence |
+|---|---:|---|
+| exact root required package command before the fix | 0 | Lease 1.945s; Controller 8.576s |
+| same pre-fix package combination with `-count=10` | 0 | Lease 10.294s; Controller 67.122s |
+| exact root required package command after the fix | 0 | Lease 2.280s; Controller 8.682s |
+| same post-fix package combination with `-count=10` | 0 | Lease 11.007s; Controller 72.522s |
+| heartbeat test with `-count=25` | 0 | 25 real cross-process repetitions passed in 34.093s |
+| heartbeat test with Race and `-count=10` | 0 | 10 Race repetitions passed in 15.933s |
+| shared integration process helper tests with Race and `-count=3` | 0 | heartbeat, two-Worker takeover, and Pause/Cancel process paths passed |
+| `make chaos-worker-kill` after shared-helper fix | 0 | `iterations=100 killed=100 succeeded=100 waiting_approval=0 artifact_present_at_kill=39`; 48.80s |
+| migration missing-digest INSERT red command | 1 | v5 accepted the invalid Artifact-backed Receipt |
+| identical migration test plus round trip after 000006 | 0 | invalid INSERT rejected, valid pair accepted, v5 row backfilled, `2→6→5→4→3→2→6` passed |
+| `make migrate` | 0 | local development schema advanced without rewriting 000005 |
+| read-only schema query | 0 | `6|false`; CHECK definition contains explicit `artifact_digest IS NOT NULL` |
+
+The two pre-fix successful repetitions are diagnostic evidence only. They do
+not override the root controller's real failure. Together with the empty child
+output in that failure, they support a non-deterministic startup observation
+problem; they do not prove which unobserved pre-registration step was delayed.
+The new helper makes any recurrence classifiable as process exit, bounded
+startup/DB timeout, or successful registration and includes the process/database
+evidence needed to diagnose it.
+
+## Final post-stability-remediation automatic acceptance
+
+Every result in this section was produced from the final working tree after
+the shared integration/Chaos helper, migration 000006, Cancel error handling,
+and both final read-only review follow-ups. The Go cache was
+`GOCACHE=/private/tmp/agentdock-go-cache-gate3-final`. PostgreSQL commands used
+`AGENTDOCK_DATABASE_URL=postgres://agentdock:agentdock_dev_only@127.0.0.1:55433/agentdock?sslmode=disable`
+with approved host access.
+
+### Required phase-3 Gate and stability repetitions
+
+| Command | Exit | Key evidence |
+|---|---:|---|
+| exact required `go test -tags=integration -count=1 ./internal/lease/... ./internal/controller/...` | 0 | Lease 2.309s; Controller 8.827s |
+| same required package combination with `-count=10` | 0 | Lease 11.441s; Controller 87.429s |
+| heartbeat process test with Race and `-count=10` | 0 | ten real cross-process repetitions passed in 17.582s |
+| exact required `go test -tags=chaos ./internal/controller/...` | 0 | Controller Chaos package passed in 54.704s |
+| exact required `go test -race ./internal/...` | 0 | every internal package passed under Race |
+| final `make chaos-worker-kill` | 0 | `iterations=100 killed=100 succeeded=100 waiting_approval=0 artifact_present_at_kill=42`; test 45.67s |
+| final `make demo-phase3` | 0 | A token 1 killed; B token 2 takeover; restarted A stale append rejected; final `Succeeded` |
+| managed-mode Critical regressions | 0 | durable `run step` bypass and initial-Acquire interleaving tests both printed PASS |
+
+The 100-Kill result proves convergence across both pre-Artifact and
+post-Artifact windows. Receipt/Artifact uniqueness assertions execute in every
+iteration. The deterministic recovery matrix separately covers unsafe
+missing-Receipt ambiguity and requires `WaitingApproval`; no exactly-once
+claim is made.
+
+### Phase-2 and phase-1 regression
+
+| Command | Exit | Key evidence |
+|---|---:|---|
+| `go test -tags=integration -count=1 ./internal/store/... ./internal/controller/...` | 0 | Store 6.023s; Controller 9.619s |
+| `go test -tags=integration -count=1 ./internal/migration/... ./cmd/agentdock` | 0 | Migration 1.875s; CLI 2.445s |
+| `go test -race -count=1 ./internal/store/... ./internal/controller/...` | 0 | Store 2.478s; Controller 2.750s |
+| first sandboxed `make test-rebuild-state` | 2 | localhost was denied by the sandbox; this is environment evidence, not a product failure or accepted pass |
+| host-context `make test-rebuild-state` | 0 | domain rebuild 0.838s; PostgreSQL checkpoint rebuild 8.249s |
+| host-context `make test-integration` | 0 | Store, Lease, Controller, Migration, and CLI integration all passed |
+| phase-1 six-test command with `-count=1 -v` | 0 | all six state-machine/Pause/failure regressions printed PASS |
+| three phase-1 concurrent Pause tests with `-count=50` | 0 | all 50 repetitions passed |
+
+### Full repository, environment, schema, and demonstrations
+
+| Command | Exit | Key evidence |
+|---|---:|---|
+| `go test -count=1 ./...` | 0 | every package passed uncached |
+| `go test -race -count=1 ./...` | 0 | every package passed uncached under Race |
+| `make test` | 0 | full Go target passed |
+| `make test-race` | 0 | full Race target passed |
+| `make lint` | 0 | no diagnostics |
+| `go vet ./...` | 0 | no diagnostics |
+| `go mod verify` | 0 | `all modules verified` |
+| `docker compose up -d` | 0 | PostgreSQL, OTel Collector, and Jaeger started |
+| host-context `make doctor` | 0 | Go, Docker, Compose, ports, YAML, and Compose model passed |
+| `docker compose stop otel-collector jaeger` | 0 | stopped only Doctor dependencies; PostgreSQL remained running |
+| final `make migrate` | 0 | `migrations applied` |
+| final `make demo-fake` | 0 | normal and Pause/Resume scenarios converged to `Succeeded` |
+| schema version query | 0 | `6|f` |
+| Receipt CHECK definition query | 0 | Artifact branch explicitly requires `artifact_digest IS NOT NULL` and a SHA-256 digest |
+
+The real migration regression rejects an INSERT with non-null `artifact_id`
+and NULL `artifact_digest`, accepts a valid pair, backfills a v5 NULL-digest
+row from its referenced Artifact, and preserves phase-2 data through
+`2→6→5→4→3→2→6`. Migration 000005 was not rewritten.
+
 ## Gate 3
 
-**INTERNAL GATE PASS; READY FOR EXTERNAL GATE 3 RE-REVIEW.** Both reported
-Critical paths have stable PostgreSQL red→green coverage, the replacement
-read-only full-range review reports Critical/Important/Minor 0, and every fresh
-post-remediation Gate above exits 0. Phase 4 remains unstarted. This internal
-result does not override the external blank-task Gatekeeper as final release
-authority.
+**INTERNAL GATE PASS; EXTERNAL RELEASE REVIEW STILL REQUIRED.** The root
+Worker-registration failure and both second-review Minors have red→green
+coverage. The exact required phase-3 Gate, package-combination repetition,
+target Race repetition, 100 real Worker kills, two-Worker demonstration,
+phase-2/phase-1 regressions, full repository test/Race/vet/mod/doctor/demo,
+and two final read-only reviews all pass on the current code. Final whitespace,
+parent-chain, commit, and clean-worktree checks are performed after this report
+is finalized and are reported in the handoff. This self-reported PASS is not
+the external blank-task Gatekeeper decision. Phase 4 remains unstarted.
