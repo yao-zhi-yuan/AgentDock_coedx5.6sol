@@ -187,7 +187,7 @@ func (store *PostgresEventStore) Append(
 	defer tx.Rollback(ctx)
 
 	var databaseTime time.Time
-	if err := tx.QueryRow(ctx, `SELECT CURRENT_TIMESTAMP`).Scan(&databaseTime); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&databaseTime); err != nil {
 		return AppendResult{}, fmt.Errorf("read database time: %w", err)
 	}
 	databaseTime = databaseTime.UTC()
@@ -212,6 +212,15 @@ func (store *PostgresEventStore) Append(
 		}
 	}
 
+	// Lease is always locked before Run. RecordReceipt follows the same
+	// Lease->Run order through its Receipt foreign key, avoiding a deadlock
+	// between a fenced append and a concurrent Receipt transaction.
+	if leaseSensitiveEvent(event) {
+		if err := validateFencingToken(ctx, tx, event); err != nil {
+			return AppendResult{}, err
+		}
+	}
+
 	var actualVersion int64
 	err = tx.QueryRow(ctx, `SELECT version FROM runs WHERE run_id = $1 FOR UPDATE`, event.RunID).Scan(&actualVersion)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -220,7 +229,14 @@ func (store *PostgresEventStore) Append(
 	if err != nil {
 		return AppendResult{}, fmt.Errorf("lock Run row: %w", err)
 	}
-
+	// The Lease share lock prevents takeover while Run may be contended, but
+	// wall-clock TTL can still elapse during that wait. Recheck after the Run
+	// lock so authority is valid at the append decision point.
+	if leaseSensitiveEvent(event) {
+		if err := validateFencingToken(ctx, tx, event); err != nil {
+			return AppendResult{}, err
+		}
+	}
 	existing, found, err := loadEventByIdempotencyKey(ctx, tx, event.RunID, event.IdempotencyKey)
 	if err != nil {
 		return AppendResult{}, err
@@ -243,6 +259,18 @@ func (store *PostgresEventStore) Append(
 			Actual:   uint64(actualVersion),
 		}
 	}
+	if event.Type == domain.EventActionCompleted {
+		if err := validateActionReceipt(ctx, tx, event); err != nil {
+			return AppendResult{}, err
+		}
+	}
+	// CURRENT_TIMESTAMP is fixed at transaction start in PostgreSQL. Refresh
+	// from the wall clock only after lock waits and fencing validation so the
+	// durable event time cannot predate a wait across the Lease TTL.
+	if err := tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&databaseTime); err != nil {
+		return AppendResult{}, fmt.Errorf("refresh database time after locks: %w", err)
+	}
+	databaseTime = databaseTime.UTC()
 
 	current, err := loadPostgresEvents(ctx, tx, event.RunID)
 	if err != nil {
@@ -283,7 +311,10 @@ func (store *PostgresEventStore) Append(
 		return AppendResult{}, fmt.Errorf("insert event: %w", err)
 	}
 
-	if event.Type == domain.EventAttemptStarted {
+	if event.Type == domain.EventAttemptStarted ||
+		(event.Type == domain.EventActionCompleted &&
+			event.Data.ActionType == domain.CommandStartAttempt &&
+			state.Run.CurrentAttempt > 0) {
 		_, err = tx.Exec(ctx, `
 			INSERT INTO attempts (
 				attempt_id, run_id, number, reason, started_at
@@ -334,6 +365,210 @@ func (store *PostgresEventStore) Append(
 		return AppendResult{}, fmt.Errorf("commit append transaction: %w", err)
 	}
 	return AppendResult{Event: event, Appended: true}, nil
+}
+
+func leaseSensitiveEvent(event domain.Event) bool {
+	switch event.Type {
+	case domain.EventLeaseAcquired,
+		domain.EventLeaseRenewed,
+		domain.EventLeaseExpired,
+		domain.EventActionPlanned,
+		domain.EventActionCompleted,
+		domain.EventActionFailed:
+		return true
+	default:
+		return event.WorkerID != "" || event.FencingToken != 0
+	}
+}
+
+func validateFencingToken(ctx context.Context, tx pgx.Tx, event domain.Event) error {
+	if event.WorkerID == "" || event.FencingToken == 0 || event.FencingToken > maxDatabaseVersion {
+		return &FencingTokenError{
+			RunID: event.RunID, WorkerID: event.WorkerID, FencingToken: event.FencingToken,
+		}
+	}
+	var currentWorker string
+	var currentToken uint64
+	var expiresAt time.Time
+	err := tx.QueryRow(ctx, `
+		SELECT worker_id, fencing_token, expires_at
+		FROM leases
+		WHERE run_id = $1
+		FOR SHARE`,
+		event.RunID,
+	).Scan(&currentWorker, &currentToken, &expiresAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return &FencingTokenError{
+			RunID: event.RunID, WorkerID: event.WorkerID, FencingToken: event.FencingToken,
+		}
+	}
+	if err != nil {
+		return fmt.Errorf("validate event fencing token: %w", err)
+	}
+	var databaseNow time.Time
+	if err := tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&databaseNow); err != nil {
+		return fmt.Errorf("read database time after Lease lock: %w", err)
+	}
+	expired := !expiresAt.After(databaseNow)
+	if expired ||
+		currentWorker != event.WorkerID ||
+		currentToken != event.FencingToken {
+		return &FencingTokenError{
+			RunID: event.RunID, WorkerID: event.WorkerID, FencingToken: event.FencingToken,
+			CurrentWorker: currentWorker, CurrentToken: currentToken, Expired: expired,
+		}
+	}
+	return nil
+}
+
+func validateActionReceipt(ctx context.Context, tx pgx.Tx, event domain.Event) error {
+	if event.Data.ReceiptID == "" || event.Data.ActionID == "" {
+		return fmt.Errorf(
+			"%w: run_id=%q action_id=%q receipt_id=%q",
+			ErrMissingActionReceipt,
+			event.RunID,
+			event.Data.ActionID,
+			event.Data.ReceiptID,
+		)
+	}
+	var receiptOutput []byte
+	var receiptScope domain.IdempotencyScope
+	var outputDigest string
+	var artifactID string
+	var artifactDigest string
+	err := tx.QueryRow(ctx, `
+		SELECT output, idempotency_scope, COALESCE(output_digest, ''),
+			COALESCE(artifact_id, ''), COALESCE(artifact_digest, '')
+		FROM action_receipts
+		WHERE run_id = $1
+		  AND action_id = $2
+		  AND receipt_id = $3
+		  AND action_type = $4`,
+		event.RunID,
+		event.Data.ActionID,
+		event.Data.ReceiptID,
+		event.Data.ActionType,
+	).Scan(&receiptOutput, &receiptScope, &outputDigest, &artifactID, &artifactDigest)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf(
+			"%w: run_id=%q action_id=%q receipt_id=%q",
+			ErrMissingActionReceipt,
+			event.RunID,
+			event.Data.ActionID,
+			event.Data.ReceiptID,
+		)
+	}
+	if err != nil {
+		return fmt.Errorf("validate action receipt: %w", err)
+	}
+	var expected domain.EventData
+	if err := json.Unmarshal(receiptOutput, &expected); err != nil {
+		return fmt.Errorf("decode action receipt for completion: %w", err)
+	}
+	var plannedAttemptID string
+	err = tx.QueryRow(ctx, `
+		SELECT COALESCE(payload->>'attempt_id', '')
+		FROM events
+		WHERE run_id = $1
+		  AND event_type = $2
+		  AND payload->>'action_id' = $3
+		  AND payload->>'action_type' = $4
+		ORDER BY seq DESC
+		LIMIT 1`,
+		event.RunID,
+		domain.EventActionPlanned,
+		event.Data.ActionID,
+		event.Data.ActionType,
+	).Scan(&plannedAttemptID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf(
+			"%w: run_id=%q action_id=%q has no ActionPlanned evidence",
+			ErrActionReceiptMismatch,
+			event.RunID,
+			event.Data.ActionID,
+		)
+	}
+	if err != nil {
+		return fmt.Errorf("load ActionPlanned evidence for completion: %w", err)
+	}
+	if err := domain.ValidateManagedReceiptEvidence(
+		event.Data.ActionType,
+		event.Data.ActionID,
+		plannedAttemptID,
+		expected,
+		outputDigest,
+		artifactID,
+		artifactDigest,
+	); err != nil {
+		return fmt.Errorf(
+			"%w: run_id=%q action_id=%q: %v",
+			ErrActionReceiptMismatch,
+			event.RunID,
+			event.Data.ActionID,
+			err,
+		)
+	}
+	if artifactID != "" {
+		var artifact ArtifactRecord
+		err := tx.QueryRow(ctx, `
+			SELECT artifact_id, run_id, COALESCE(attempt_id, ''), artifact_type,
+				digest, path, size
+			FROM artifacts
+			WHERE artifact_id = $1`,
+			artifactID,
+		).Scan(
+			&artifact.ID,
+			&artifact.RunID,
+			&artifact.AttemptID,
+			&artifact.Type,
+			&artifact.Digest,
+			&artifact.Path,
+			&artifact.Size,
+		)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf(
+				"%w: run_id=%q action_id=%q Artifact %q is missing",
+				ErrActionReceiptMismatch,
+				event.RunID,
+				event.Data.ActionID,
+				artifactID,
+			)
+		}
+		if err != nil {
+			return fmt.Errorf("load Artifact evidence for completion: %w", err)
+		}
+		if artifact.RunID != event.RunID ||
+			artifact.AttemptID != plannedAttemptID ||
+			artifact.Type != domain.Phase3ReceiptArtifactType ||
+			artifact.Digest != artifactDigest {
+			return fmt.Errorf(
+				"%w: run_id=%q action_id=%q Artifact metadata does not match its Receipt",
+				ErrActionReceiptMismatch,
+				event.RunID,
+				event.Data.ActionID,
+			)
+		}
+		if err := verifyArtifactRecordBytes(artifact); err != nil {
+			return err
+		}
+	}
+	expected.ActionID = event.Data.ActionID
+	expected.ActionType = event.Data.ActionType
+	expected.IdempotencyScope = receiptScope
+	expected.ReceiptID = event.Data.ReceiptID
+	expected.OutputDigest = outputDigest
+	expected.ArtifactID = artifactID
+	expected.ArtifactDigest = artifactDigest
+	if expected != event.Data {
+		return fmt.Errorf(
+			"%w: run_id=%q action_id=%q receipt_id=%q",
+			ErrActionReceiptMismatch,
+			event.RunID,
+			event.Data.ActionID,
+			event.Data.ReceiptID,
+		)
+	}
+	return nil
 }
 
 // SaveCheckpoint validates and stores a disposable snapshot without changing

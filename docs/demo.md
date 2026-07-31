@@ -45,3 +45,31 @@ go run ./cmd/agentdock run events restart-demo
 ```
 
 Continue `run step` until `Succeeded`; `run events` shows a contiguous sequence. This demonstrates database reconstruction and the same Reconcile path, not lease takeover, Worker Kill recovery, fencing, Docker isolation, Eino, real verifiers, repair, fault injection, OTel, or product Replay.
+
+Phase 3 adds the required two-Worker recovery demonstration:
+
+```bash
+docker compose up -d postgres
+make migrate
+make demo-phase3
+```
+
+The demonstration starts Workers A and B together. A acquires the Lease while
+B stays registered, heartbeats independently, and waits. It kills A, waits for
+TTL expiry, observes B take over with a larger token, then starts the Worker
+binary again as an explicit A/old-token probe. That process presents A's old
+token to a lease-sensitive append, prints `stale_probe_rejected`, and exits
+successfully only when PostgreSQL rejects it. Worker B then shows the Run
+converging to `Succeeded`.
+
+The full randomized process harness is:
+
+```bash
+make chaos-worker-kill
+```
+
+It performs 100 real Worker process kills over seeded random windows spanning
+planning, in-executor work, the post-action/pre-Receipt gap, and later actions.
+The harness requires at least one Artifact-present Kill window and verifies
+unique Receipt/Artifact accounting. It is a local MVP reliability test, not a
+production scheduler or strong isolation claim.

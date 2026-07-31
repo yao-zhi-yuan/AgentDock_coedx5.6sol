@@ -77,18 +77,23 @@ type Attempt struct {
 // and contains no clock, random source, network client, callback, or hidden
 // process-local authority.
 type State struct {
-	Exists             bool      `json:"exists"`
-	Run                Run       `json:"run"`
-	AttemptID          string    `json:"attempt_id,omitempty"`
-	ResumeState        Status    `json:"resume_state,omitempty"`
-	PendingActionID    string    `json:"pending_action_id,omitempty"`
-	ReasoningOutput    string    `json:"reasoning_output,omitempty"`
-	ToolName           string    `json:"tool_name,omitempty"`
-	ToolArguments      string    `json:"tool_arguments,omitempty"`
-	PatchProduced      bool      `json:"patch_produced"`
-	VerificationPassed bool      `json:"verification_passed"`
-	FailureReason      string    `json:"failure_reason,omitempty"`
-	LastEventType      EventType `json:"last_event_type,omitempty"`
+	Exists                bool             `json:"exists"`
+	Run                   Run              `json:"run"`
+	AttemptID             string           `json:"attempt_id,omitempty"`
+	ResumeState           Status           `json:"resume_state,omitempty"`
+	PendingActionID       string           `json:"pending_action_id,omitempty"`
+	PendingActionType     CommandType      `json:"pending_action_type,omitempty"`
+	PendingAttemptID      string           `json:"pending_attempt_id,omitempty"`
+	PendingActionScope    IdempotencyScope `json:"pending_action_scope,omitempty"`
+	LastCompletedActionID string           `json:"last_completed_action_id,omitempty"`
+	LastReceiptID         string           `json:"last_receipt_id,omitempty"`
+	ReasoningOutput       string           `json:"reasoning_output,omitempty"`
+	ToolName              string           `json:"tool_name,omitempty"`
+	ToolArguments         string           `json:"tool_arguments,omitempty"`
+	PatchProduced         bool             `json:"patch_produced"`
+	VerificationPassed    bool             `json:"verification_passed"`
+	FailureReason         string           `json:"failure_reason,omitempty"`
+	LastEventType         EventType        `json:"last_event_type,omitempty"`
 }
 
 // InitialState is the projection of an empty event log.
@@ -125,6 +130,9 @@ const (
 	EventApprovalRequested         EventType = "ApprovalRequested"
 	EventApprovalResolved          EventType = "ApprovalResolved"
 	EventCheckpointSaved           EventType = "CheckpointSaved"
+	EventActionPlanned             EventType = "ActionPlanned"
+	EventActionCompleted           EventType = "ActionCompleted"
+	EventActionFailed              EventType = "ActionFailed"
 	EventRunSucceeded              EventType = "RunSucceeded"
 	EventRunFailed                 EventType = "RunFailed"
 	EventRunCancelled              EventType = "RunCancelled"
@@ -133,15 +141,22 @@ const (
 // EventData is the small, framework-neutral phase-1 payload. It is deliberately
 // not a phase-4 Tool Contract or a provider message schema.
 type EventData struct {
-	ScenarioID    string       `json:"scenario_id,omitempty"`
-	SpecHash      string       `json:"spec_hash,omitempty"`
-	DesiredState  DesiredState `json:"desired_state,omitempty"`
-	AttemptID     string       `json:"attempt_id,omitempty"`
-	ActionID      string       `json:"action_id,omitempty"`
-	Output        string       `json:"output,omitempty"`
-	ToolName      string       `json:"tool_name,omitempty"`
-	ToolArguments string       `json:"tool_arguments,omitempty"`
-	Reason        string       `json:"reason,omitempty"`
+	ScenarioID       string           `json:"scenario_id,omitempty"`
+	SpecHash         string           `json:"spec_hash,omitempty"`
+	DesiredState     DesiredState     `json:"desired_state,omitempty"`
+	AttemptID        string           `json:"attempt_id,omitempty"`
+	ActionID         string           `json:"action_id,omitempty"`
+	ActionType       CommandType      `json:"action_type,omitempty"`
+	IdempotencyScope IdempotencyScope `json:"idempotency_scope,omitempty"`
+	ReceiptID        string           `json:"receipt_id,omitempty"`
+	Outcome          ActionOutcome    `json:"outcome,omitempty"`
+	Output           string           `json:"output,omitempty"`
+	OutputDigest     string           `json:"output_digest,omitempty"`
+	ArtifactID       string           `json:"artifact_id,omitempty"`
+	ArtifactDigest   string           `json:"artifact_digest,omitempty"`
+	ToolName         string           `json:"tool_name,omitempty"`
+	ToolArguments    string           `json:"tool_arguments,omitempty"`
+	Reason           string           `json:"reason,omitempty"`
 }
 
 // Event is the ordered envelope consumed by Reduce. Seq is assigned by the
@@ -174,6 +189,29 @@ const (
 	CommandSucceedRun         CommandType = "SucceedRun"
 	CommandFailRun            CommandType = "FailRun"
 	CommandCancelRun          CommandType = "CancelRun"
+)
+
+// IdempotencyScope describes whether a planned action may be retried after an
+// ambiguous crash window. It is deliberately narrower than a future Tool
+// Contract: phase 3 only needs an honest recovery decision.
+type IdempotencyScope string
+
+const (
+	IdempotencyScoped IdempotencyScope = "scoped-idempotent"
+	IdempotencyUnsafe IdempotencyScope = "unsafe"
+)
+
+func (scope IdempotencyScope) Valid() bool {
+	return scope == IdempotencyScoped || scope == IdempotencyUnsafe
+}
+
+// ActionOutcome distinguishes a known action failure from an outcome that
+// cannot be safely inferred after a crash.
+type ActionOutcome string
+
+const (
+	ActionOutcomeFailed    ActionOutcome = "failed"
+	ActionOutcomeAmbiguous ActionOutcome = "ambiguous"
 )
 
 // Command describes at most one reconcile action. ActionID is derived only

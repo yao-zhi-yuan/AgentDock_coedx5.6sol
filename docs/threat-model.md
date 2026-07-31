@@ -2,7 +2,7 @@
 
 ## Scope and current status
 
-This threat model covers the five-week local MVP. Phase 0 implements configuration and documentation only; every runtime control below is marked **planned** unless it is an environment/configuration check performed by `make doctor`.
+This threat model covers the five-week local MVP through phase 3. Runtime controls not yet implemented remain described as planned.
 
 The MVP is not a multi-tenant service and must not be presented as one.
 
@@ -45,7 +45,7 @@ The model output, target repository, generated patch, tool arguments, and sandbo
 | Credential leakage | environment allowlist, redaction, no secrets in events/traces/cassettes | provider or operator misconfiguration |
 | Container breakout | non-root user, read-only root, dropped capabilities, resource limits | shared kernel means breakout cannot be ruled out |
 | Denial of service | CPU/memory/PID/time/output limits and cleanup | disk pressure or Docker daemon impact |
-| Stale worker writes | PostgreSQL fencing-token checks | non-database side effect must still be idempotent/receipted |
+| Stale worker writes | **Implemented in phase 3:** PostgreSQL owner/token/expiry checks for managed Events and Receipts | non-database side effect must still be scoped-idempotent/receipted |
 | Forged verifier success | verifier identity/role and digest-bound evidence | compromised verifier worker or store |
 | Replay disclosure | redacted immutable cassettes, credential scanning | prompts or repository text may still be sensitive |
 | Replay false equivalence | pinned versions/digests and explicit divergence | unavoidable external or platform nondeterminism |
@@ -76,3 +76,22 @@ Committed files contain only documented local example values. Real model keys an
 3. Replay consistency and the risk of leaking recorded data.
 
 Each later phase must update this document with implemented controls and test evidence. A planned control is not evidence that the risk is mitigated.
+
+## Phase 3 recovery controls
+
+- Worker registration and heartbeat are durable PostgreSQL rows; process
+  heartbeat runs independently of Lease polling and renewal.
+- Lease acquisition/takeover is serialized per Run; takeover increments the
+  fencing token.
+- Managed Event and Receipt transactions reject stale or expired authority
+  before idempotency replay, using wall-clock time after lock waits.
+- Unknown unsafe outcomes stop in `WaitingApproval`.
+- Malformed Receipt output or changed Artifact bytes cannot complete a Run;
+  recovery dry-reduces and re-hashes the evidence, then stops in
+  `WaitingApproval`.
+- The 100-iteration Worker Kill harness uses real OS processes and verifies
+  terminal convergence plus unique Receipt/Artifact accounting.
+
+These controls do not prevent a stale process from consuming CPU or performing
+a non-database side effect. Safety still depends on the action's scoped
+idempotency and durable Receipt/Artifact evidence.

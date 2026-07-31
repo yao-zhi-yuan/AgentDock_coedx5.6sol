@@ -9,12 +9,44 @@ import (
 )
 
 var (
-	ErrRunNotFound         = errors.New("run not found")
-	ErrInvalidAppend       = errors.New("invalid event append")
-	ErrVersionConflict     = errors.New("run version conflict")
-	ErrIdempotencyConflict = errors.New("idempotency key conflicts with existing event")
-	ErrSensitivePayload    = errors.New("event payload contains credential material")
+	ErrRunNotFound           = errors.New("run not found")
+	ErrInvalidAppend         = errors.New("invalid event append")
+	ErrVersionConflict       = errors.New("run version conflict")
+	ErrIdempotencyConflict   = errors.New("idempotency key conflicts with existing event")
+	ErrSensitivePayload      = errors.New("event payload contains credential material")
+	ErrStaleFencingToken     = errors.New("stale worker fencing token")
+	ErrMissingActionReceipt  = errors.New("action completion has no matching durable receipt")
+	ErrActionReceiptMismatch = errors.New("action completion does not match durable receipt")
+	ErrArtifactNotFound      = errors.New("artifact not found")
+	ErrArtifactIntegrity     = errors.New("artifact integrity check failed")
 )
+
+// FencingTokenError reports the presented and authoritative Worker authority.
+type FencingTokenError struct {
+	RunID         string
+	WorkerID      string
+	FencingToken  uint64
+	CurrentWorker string
+	CurrentToken  uint64
+	Expired       bool
+}
+
+func (err *FencingTokenError) Error() string {
+	return fmt.Sprintf(
+		"%s: run_id=%q worker_id=%q token=%d current_worker=%q current_token=%d expired=%t",
+		ErrStaleFencingToken,
+		err.RunID,
+		err.WorkerID,
+		err.FencingToken,
+		err.CurrentWorker,
+		err.CurrentToken,
+		err.Expired,
+	)
+}
+
+func (err *FencingTokenError) Unwrap() error {
+	return ErrStaleFencingToken
+}
 
 // VersionConflictError reports the expected and authoritative Run versions.
 type VersionConflictError struct {

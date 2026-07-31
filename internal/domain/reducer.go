@@ -164,6 +164,24 @@ func applyEvent(state *State, event Event) error {
 		}
 		return applyDesiredState(state, event.Data.DesiredState)
 
+	case EventLeaseAcquired, EventLeaseRenewed, EventLeaseExpired:
+		if !state.Exists {
+			return fmt.Errorf("%w: %s requires RunCreated", ErrInvalidTransition, event.Type)
+		}
+		if event.WorkerID == "" || event.FencingToken == 0 {
+			return fmt.Errorf("%w: %s requires worker_id and fencing_token", ErrInvalidEvent, event.Type)
+		}
+		return nil
+
+	case EventActionPlanned:
+		return applyActionPlanned(state, event)
+
+	case EventActionCompleted:
+		return applyActionCompleted(state, event)
+
+	case EventActionFailed:
+		return applyActionFailed(state, event)
+
 	case EventAttemptStarted:
 		if err := requireActiveState(state, StatusQueued); err != nil {
 			return err
@@ -356,6 +374,249 @@ func applyDesiredState(state *State, desired DesiredState) error {
 	return fmt.Errorf("%w: unknown desired state %q", ErrInvalidEvent, desired)
 }
 
+func applyActionPlanned(state *State, event Event) error {
+	if !state.Exists {
+		return fmt.Errorf("%w: ActionPlanned requires RunCreated", ErrInvalidTransition)
+	}
+	if event.Data.ActionID == "" || event.Data.ActionType == "" || !event.Data.IdempotencyScope.Valid() {
+		return fmt.Errorf(
+			"%w: ActionPlanned requires action_id, action_type, and valid idempotency_scope",
+			ErrInvalidEvent,
+		)
+	}
+	if state.PendingActionID != "" {
+		return fmt.Errorf("%w: action %q already pending", ErrInvalidTransition, state.PendingActionID)
+	}
+	command := Decide(*state)
+	if command.Type == CommandNoop ||
+		command.Type != event.Data.ActionType ||
+		command.ActionID != event.Data.ActionID {
+		return fmt.Errorf(
+			"%w: planned action %s/%q does not match decision %s/%q",
+			ErrInvalidTransition,
+			event.Data.ActionType,
+			event.Data.ActionID,
+			command.Type,
+			command.ActionID,
+		)
+	}
+	if command.Type == CommandStartAttempt && event.Data.AttemptID != command.AttemptID {
+		return fmt.Errorf(
+			"%w: attempt_id %q does not match decision %q",
+			ErrInvalidTransition,
+			event.Data.AttemptID,
+			command.AttemptID,
+		)
+	}
+	state.PendingActionID = event.Data.ActionID
+	state.PendingActionType = event.Data.ActionType
+	state.PendingAttemptID = event.Data.AttemptID
+	state.PendingActionScope = event.Data.IdempotencyScope
+	return nil
+}
+
+func applyActionCompleted(state *State, event Event) error {
+	if event.Data.ReceiptID == "" {
+		return fmt.Errorf("%w: ActionCompleted requires receipt_id", ErrInvalidEvent)
+	}
+	if err := requireManagedPendingAction(state, event.Data.ActionID, event.Data.ActionType); err != nil {
+		return err
+	}
+
+	cancelWins := state.Run.DesiredState == DesiredCancelled &&
+		event.Data.ActionType != CommandCancelRun
+	if !cancelWins {
+		if err := applyCompletedActionResult(state, event.Data); err != nil {
+			return err
+		}
+	}
+	state.PendingActionID = ""
+	state.PendingActionType = ""
+	state.PendingAttemptID = ""
+	state.PendingActionScope = ""
+	state.LastCompletedActionID = event.Data.ActionID
+	state.LastReceiptID = event.Data.ReceiptID
+	return nil
+}
+
+// ValidateActionCompletion checks whether Receipt-backed completion data can
+// advance the current projection. It mutates only a copy and is used before a
+// recovered Receipt is trusted.
+func ValidateActionCompletion(state State, data EventData) error {
+	return applyActionCompleted(&state, Event{Data: data})
+}
+
+// ValidateManagedActionOutput rejects action-specific Receipt payloads that
+// could never be reduced. The planned Attempt ID is read from the durable
+// ActionPlanned event by the Receipt writer.
+func ValidateManagedActionOutput(
+	actionType CommandType,
+	plannedAttemptID string,
+	output EventData,
+) error {
+	switch actionType {
+	case CommandStartAttempt:
+		if output.AttemptID == "" || output.AttemptID != plannedAttemptID {
+			return fmt.Errorf(
+				"%w: StartAttempt Receipt attempt_id %q does not match planned %q",
+				ErrInvalidEvent,
+				output.AttemptID,
+				plannedAttemptID,
+			)
+		}
+	case CommandRunReasoner:
+		if output.ToolName == "" {
+			return fmt.Errorf("%w: RunReasoner Receipt requires tool_name", ErrInvalidEvent)
+		}
+	case CommandFailRun:
+		if output.Reason == "" {
+			return fmt.Errorf("%w: FailRun Receipt requires a failure reason", ErrInvalidEvent)
+		}
+	}
+	return nil
+}
+
+func applyActionFailed(state *State, event Event) error {
+	if err := requireManagedPendingAction(state, event.Data.ActionID, event.Data.ActionType); err != nil {
+		return err
+	}
+	if event.Data.Reason == "" {
+		return fmt.Errorf("%w: ActionFailed requires reason", ErrInvalidEvent)
+	}
+	if event.Data.Outcome != ActionOutcomeFailed && event.Data.Outcome != ActionOutcomeAmbiguous {
+		return fmt.Errorf("%w: ActionFailed has invalid outcome %q", ErrInvalidEvent, event.Data.Outcome)
+	}
+	state.PendingActionID = ""
+	state.PendingActionType = ""
+	state.PendingAttemptID = ""
+	state.PendingActionScope = ""
+	state.FailureReason = event.Data.Reason
+	if event.Data.Outcome == ActionOutcomeAmbiguous &&
+		state.Run.DesiredState != DesiredCancelled {
+		return advanceManagedState(state, StatusWaitingApproval)
+	}
+	return nil
+}
+
+func requireManagedPendingAction(state *State, actionID string, actionType CommandType) error {
+	if actionID == "" ||
+		actionID != state.PendingActionID ||
+		actionType == "" ||
+		actionType != state.PendingActionType {
+		return fmt.Errorf(
+			"%w: action %s/%q does not match pending %s/%q",
+			ErrInvalidTransition,
+			actionType,
+			actionID,
+			state.PendingActionType,
+			state.PendingActionID,
+		)
+	}
+	return nil
+}
+
+func applyCompletedActionResult(state *State, data EventData) error {
+	switch data.ActionType {
+	case CommandStartAttempt:
+		if data.AttemptID == "" {
+			return fmt.Errorf("%w: StartAttempt completion requires attempt_id", ErrInvalidEvent)
+		}
+		if err := requireManagedLogicalState(state, StatusQueued); err != nil {
+			return err
+		}
+		if err := advanceManagedState(state, StatusProvisioning); err != nil {
+			return err
+		}
+		state.Run.CurrentAttempt++
+		state.AttemptID = data.AttemptID
+		return nil
+	case CommandProvisionWorkspace:
+		if err := requireManagedLogicalState(state, StatusProvisioning); err != nil {
+			return err
+		}
+		return advanceManagedState(state, StatusReasoning)
+	case CommandRunReasoner:
+		if err := requireManagedLogicalState(state, StatusReasoning); err != nil {
+			return err
+		}
+		if data.ToolName == "" {
+			return fmt.Errorf("%w: RunReasoner completion requires tool_name", ErrInvalidEvent)
+		}
+		if err := advanceManagedState(state, StatusActing); err != nil {
+			return err
+		}
+		state.ReasoningOutput = data.Output
+		state.ToolName = data.ToolName
+		state.ToolArguments = data.ToolArguments
+		return nil
+	case CommandApplyPatch:
+		if err := requireManagedLogicalState(state, StatusActing); err != nil {
+			return err
+		}
+		if err := advanceManagedState(state, StatusVerifying); err != nil {
+			return err
+		}
+		state.PatchProduced = true
+		return nil
+	case CommandVerify:
+		if err := requireManagedLogicalState(state, StatusVerifying); err != nil {
+			return err
+		}
+		state.VerificationPassed = true
+		return nil
+	case CommandSucceedRun:
+		if err := requireManagedLogicalState(state, StatusVerifying); err != nil {
+			return err
+		}
+		if !state.VerificationPassed {
+			return fmt.Errorf("%w: success requires completed verification evidence", ErrInvalidTransition)
+		}
+		return advanceManagedState(state, StatusSucceeded)
+	case CommandFailRun:
+		if state.FailureReason == "" && data.Reason == "" {
+			return fmt.Errorf("%w: FailRun completion requires a failure reason", ErrInvalidEvent)
+		}
+		if data.Reason != "" {
+			state.FailureReason = data.Reason
+		}
+		return advanceManagedState(state, StatusFailed)
+	case CommandCancelRun:
+		if state.Run.DesiredState != DesiredCancelled {
+			return fmt.Errorf("%w: CancelRun completion requires cancelled intent", ErrInvalidTransition)
+		}
+		return advanceManagedState(state, StatusCancelled)
+	default:
+		return fmt.Errorf("%w: completed action %s", ErrInvalidEvent, data.ActionType)
+	}
+}
+
+func requireManagedLogicalState(state *State, expected Status) error {
+	logical := state.Run.ObservedState
+	if logical == StatusPaused {
+		logical = state.ResumeState
+	}
+	if logical != expected {
+		return fmt.Errorf(
+			"%w: managed action requires logical state %s, got %s",
+			ErrInvalidTransition,
+			expected,
+			logical,
+		)
+	}
+	return nil
+}
+
+func advanceManagedState(state *State, next Status) error {
+	if state.Run.ObservedState == StatusPaused {
+		if err := ValidateTransition(state.ResumeState, next); err != nil {
+			return err
+		}
+		state.ResumeState = next
+		return nil
+	}
+	return transition(state, next)
+}
+
 func requireActiveState(state *State, expected Status) error {
 	if !state.Exists {
 		return fmt.Errorf("%w: %s requires RunCreated", ErrInvalidTransition, expected)
@@ -434,34 +695,40 @@ func ValidateTransition(from, to Status) error {
 			StatusQueued: {},
 		},
 		StatusQueued: {
-			StatusProvisioning: {},
-			StatusPaused:       {},
-			StatusCancelled:    {},
+			StatusProvisioning:    {},
+			StatusPaused:          {},
+			StatusWaitingApproval: {},
+			StatusFailed:          {},
+			StatusCancelled:       {},
 		},
 		StatusProvisioning: {
-			StatusReasoning: {},
-			StatusPaused:    {},
-			StatusFailed:    {},
-			StatusCancelled: {},
+			StatusReasoning:       {},
+			StatusPaused:          {},
+			StatusWaitingApproval: {},
+			StatusFailed:          {},
+			StatusCancelled:       {},
 		},
 		StatusReasoning: {
-			StatusActing:    {},
-			StatusPaused:    {},
-			StatusFailed:    {},
-			StatusCancelled: {},
+			StatusActing:          {},
+			StatusPaused:          {},
+			StatusWaitingApproval: {},
+			StatusFailed:          {},
+			StatusCancelled:       {},
 		},
 		StatusActing: {
-			StatusVerifying: {},
-			StatusPaused:    {},
-			StatusFailed:    {},
-			StatusCancelled: {},
+			StatusVerifying:       {},
+			StatusPaused:          {},
+			StatusWaitingApproval: {},
+			StatusFailed:          {},
+			StatusCancelled:       {},
 		},
 		StatusVerifying: {
-			StatusSucceeded: {},
-			StatusRepairing: {},
-			StatusPaused:    {},
-			StatusFailed:    {},
-			StatusCancelled: {},
+			StatusSucceeded:       {},
+			StatusRepairing:       {},
+			StatusPaused:          {},
+			StatusWaitingApproval: {},
+			StatusFailed:          {},
+			StatusCancelled:       {},
 		},
 		StatusRepairing: {
 			StatusReasoning:       {},
@@ -472,6 +739,7 @@ func ValidateTransition(from, to Status) error {
 		},
 		StatusWaitingApproval: {
 			StatusReasoning: {},
+			StatusPaused:    {},
 			StatusFailed:    {},
 			StatusCancelled: {},
 		},
@@ -483,6 +751,8 @@ func ValidateTransition(from, to Status) error {
 			StatusVerifying:       {},
 			StatusRepairing:       {},
 			StatusWaitingApproval: {},
+			StatusSucceeded:       {},
+			StatusFailed:          {},
 			StatusCancelled:       {},
 		},
 	}

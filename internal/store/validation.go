@@ -24,8 +24,17 @@ func validateAppendInput(event domain.Event) error {
 	if event.RunID == "" || event.IdempotencyKey == "" || event.Seq != 0 {
 		return fmt.Errorf("%w: run_id and idempotency_key are required and seq must be zero", ErrInvalidAppend)
 	}
-	if containsCredentialMaterial(event.Data) {
+	if err := ValidateEventData(event.Data); err != nil {
 		return fmt.Errorf("%w: run_id=%q idempotency_key=%q", ErrSensitivePayload, event.RunID, event.IdempotencyKey)
+	}
+	return nil
+}
+
+// ValidateEventData applies the same credential-material rejection to durable
+// Receipt output before it can later become ActionCompleted payload.
+func ValidateEventData(data domain.EventData) error {
+	if containsCredentialMaterial(data) {
+		return ErrSensitivePayload
 	}
 	return nil
 }

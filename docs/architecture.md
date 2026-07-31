@@ -10,7 +10,7 @@ Prepare → Reason → Act → Verify → Repair → Verify → Complete
 
 The project differentiates itself through durable state, crash recovery, concurrency control, isolated execution, deterministic verification, replay, and evidence—not through a general workflow engine.
 
-This contract was frozen in phase 0. Phase 2 implements the domain reducer/decider, framework-neutral Reasoner seam and FakeReasoner, compatible memory and PostgreSQL Event Stores, transactional Run-version CAS, verified checkpoints, Artifact registration, one Reconcile path, and a PostgreSQL-backed restartable CLI. Other components shown below remain planned for their assigned phases.
+This contract was frozen in phase 0. Phase 3 implements the domain reducer/decider, framework-neutral Reasoner seam and FakeReasoner, compatible memory and PostgreSQL Event Stores, transactional Run-version CAS, verified checkpoints, Worker registration, Run leases, heartbeat, monotonically increasing fencing tokens, durable Action Receipts, crash takeover, and a PostgreSQL-backed Worker CLI. Other components shown below remain planned for their assigned phases.
 
 ## Request-to-artifact path
 
@@ -54,7 +54,7 @@ The end-to-end path is:
 |---|---|---|
 | CLI | user commands and rendering | workflow truth |
 | Controller | desired/observed lifecycle and reconcile decisions | model-internal state |
-| PostgreSQL store | ordered events, transactional run version, attempts, checkpoint cache, artifact metadata | artifact bytes or phase-3 lease behavior |
+| PostgreSQL store | ordered events, transactional run version/fencing checks, attempts, checkpoint cache, artifact metadata | artifact bytes or deciding action safety |
 | Worker | leased action execution | permanent authority |
 | Reasoner seam | framework-neutral request/result contract used by Controller | Eino/provider types and run lifecycle |
 | FakeReasoner | deterministic phase 1 reasoning for the pure state-machine demo | live models, Eino, streaming, replay |
@@ -63,7 +63,7 @@ The end-to-end path is:
 | Tool/policy layer | schemas, capabilities, paths, network and budgets | arbitrary host shell |
 | Sandbox | disposable worktree and constrained process execution | strong tenant isolation |
 | Verifier | deterministic pass/fail evidence | accepting an agent's self-report |
-| Artifact store | complete-at-registration evidence bytes and digest metadata | deciding success or preventing later file/metadata mutation in phase 2 |
+| Artifact store | complete-at-registration evidence bytes, stable idempotent identity, and digest metadata | deciding success or preventing later file/metadata mutation |
 | Replay | state reconstruction and recorded dependency playback | silently ignoring divergence |
 
 ## Eino boundary
@@ -88,13 +88,21 @@ Load events
 → Renew or release lease
 ```
 
-Phase 2 runs this same path after a clean start or process restart. PostgreSQL events are the authority; Run columns and checkpoints are reproducible caches, and a corrupt checkpoint falls back to full-log reduction. Lease takeover and incomplete external-action recovery remain phase 3. Process memory is a cache only.
+Phase 3 runs this same path after a clean start, process restart, or lease takeover. PostgreSQL events and Action Receipts are the recovery inputs; Run columns and checkpoints are reproducible caches, and a corrupt checkpoint falls back to full-log reduction. Process memory is a cache only.
 
-## Leases and fencing (phase 3)
+## Leases and fencing
 
-The phase 2 migration creates the frozen `leases` table only. It does not register Workers, acquire or renew leases, issue fencing tokens, take over work, or reject stale Workers. Those behaviors begin in phase 3.
+Each process incarnation registers a unique, non-reusable Worker ID in
+PostgreSQL and updates a process heartbeat from an independent ticker, including
+while Lease acquisition is waiting or polling slowly. Duplicate registration is
+rejected so two live processes cannot share one lease identity/token. A Run has
+at most one Lease row. Initial acquisition receives token 1; a takeover is
+permitted only after database-time expiry and increments the previous token
+under a row lock. Renewal extends expiry without changing the token. Lease
+checks and expiry writes use PostgreSQL `clock_timestamp()` after lock waits;
+transaction-start time is never treated as post-wait authority.
 
-The planned rule is that a lease grants temporary scheduling ownership; it cannot revoke a process that is paused or partitioned. Every acquisition increments the Run's fencing token in PostgreSQL. Each lease-sensitive append and receipt carries that token. The store then rejects a token lower than the current token.
+A lease grants temporary scheduling ownership; it cannot revoke a paused, killed, or partitioned process. Every lease-sensitive append and Receipt presents the Worker ID and token. PostgreSQL checks the current owner, exact token, and unexpired TTL in the same transaction before idempotency replay. A stale Worker therefore cannot turn an old duplicate into an apparent success.
 
 ## Crash windows
 
@@ -102,11 +110,21 @@ The planned rule is that a lease grants temporary scheduling ownership; it canno
 |---|---|---|
 | Before `ActionPlanned` | no intent exists | decide the action normally |
 | After planned, before execution | intent exists, no receipt | retry only if the scoped action is idempotent |
-| During execution | intent exists, completion uncertain | inspect receipt/workspace; retry if safe, otherwise request approval |
+| During execution | intent exists, completion uncertain | inspect Receipt/Artifact; retry if scoped-safe, otherwise request approval |
 | After execution, before completed event | side effect or receipt may exist | reconcile by stable `action_id`; never assume absence |
 | After completed event | completion is durable | reduce and advance; do not execute again |
 
-Allowed side effects are limited to a disposable worktree, temporary containers, event appends, and artifact-directory writes. Actions outside that set are out of scope.
+Phase 3 uses only Event/Receipt appends and one deterministic receipt Artifact.
+Receipt persistence rejects action-specific output that cannot be reduced.
+The Receipt stores independent canonical inline-output and Artifact-byte
+digests. ApplyPatch evidence is bound to the stable action ID, Run, planned
+Attempt, phase-3 Artifact type, and digest. Before a Receipt completes recovery,
+its output is dry-reduced and referenced Artifact metadata/bytes are re-hashed;
+the PostgreSQL Event Store repeats the byte check inside direct
+`ActionCompleted` append validation so bypassing Controller cannot bless
+changed evidence. Malformed or changed evidence enters `WaitingApproval`.
+Disposable worktrees and containers remain phase 4. Actions outside the frozen
+MVP side-effect set are out of scope.
 
 ## Execution semantics
 

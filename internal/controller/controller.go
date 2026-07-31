@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/agentdock/agentdock-verify/internal/domain"
+	"github.com/agentdock/agentdock-verify/internal/lease"
 	"github.com/agentdock/agentdock-verify/internal/reasoner"
 	"github.com/agentdock/agentdock-verify/internal/store"
 )
@@ -17,8 +18,10 @@ var (
 
 // Controller owns desired-state changes and one deterministic Reconcile path.
 type Controller struct {
-	store    store.EventStore
-	reasoner reasoner.Reasoner
+	store          store.EventStore
+	reasoner       reasoner.Reasoner
+	leaseManager   lease.Manager
+	managedOptions ManagedOptions
 }
 
 // CreateRunRequest contains explicit caller inputs; no ID, clock, or random
@@ -88,29 +91,44 @@ func (controller *Controller) SetDesiredState(ctx context.Context, runID string,
 	if !desired.Valid() {
 		return domain.State{}, fmt.Errorf("%w: desired state %q", ErrInvalidRequest, desired)
 	}
-	state, err := controller.GetRun(ctx, runID)
-	if err != nil {
-		return domain.State{}, err
-	}
-	if state.Run.ObservedState.Terminal() {
-		return domain.State{}, fmt.Errorf("%w: %s", domain.ErrTerminalState, state.Run.ObservedState)
-	}
-	if state.Run.DesiredState == desired {
-		return state, nil
-	}
+	const maxDesiredStateRetries = 64
+	for attempt := 0; attempt < maxDesiredStateRetries; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return domain.State{}, err
+		}
+		state, err := controller.GetRun(ctx, runID)
+		if err != nil {
+			return domain.State{}, err
+		}
+		if state.Run.ObservedState.Terminal() {
+			return domain.State{}, fmt.Errorf("%w: %s", domain.ErrTerminalState, state.Run.ObservedState)
+		}
+		if state.Run.DesiredState == desired {
+			return state, nil
+		}
 
-	key := fmt.Sprintf("desired:%s:v%d", desired, state.Run.Version)
-	_, err = controller.store.Append(ctx, state.Run.Version, domain.Event{
-		RunID:          runID,
-		Type:           domain.EventDesiredStateChanged,
-		Data:           domain.EventData{DesiredState: desired},
-		IdempotencyKey: key,
-		CorrelationID:  runID,
-	})
-	if err != nil {
-		return domain.State{}, fmt.Errorf("append desired state %s: %w", desired, err)
+		key := fmt.Sprintf("desired:%s:v%d", desired, state.Run.Version)
+		_, err = controller.store.Append(ctx, state.Run.Version, domain.Event{
+			RunID:          runID,
+			Type:           domain.EventDesiredStateChanged,
+			Data:           domain.EventData{DesiredState: desired},
+			IdempotencyKey: key,
+			CorrelationID:  runID,
+		})
+		if errors.Is(err, store.ErrVersionConflict) {
+			continue
+		}
+		if err != nil {
+			return domain.State{}, fmt.Errorf("append desired state %s: %w", desired, err)
+		}
+		return controller.GetRun(ctx, runID)
 	}
-	return controller.GetRun(ctx, runID)
+	return domain.State{}, fmt.Errorf(
+		"append desired state %s after %d retries: %w",
+		desired,
+		maxDesiredStateRetries,
+		store.ErrVersionConflict,
+	)
 }
 
 // Reconcile rebuilds, decides one command, and persists its current

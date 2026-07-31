@@ -19,6 +19,13 @@ func Decide(state State) Command {
 		return Command{Type: CommandNoop}
 	}
 
+	// WaitingApproval is an operator-owned hold. The ambiguity reason remains
+	// visible in the projection, but it must not be converted into FailRun by
+	// an automatic reconcile. Cancel intent above may still supersede it.
+	if state.Run.ObservedState == StatusWaitingApproval {
+		return Command{Type: CommandNoop}
+	}
+
 	if state.FailureReason != "" {
 		return commandFor(state, CommandFailRun)
 	}

@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // ArtifactInput describes bytes that must be complete before registration.
@@ -127,6 +129,7 @@ func (store *PostgresArtifactStore) Write(
 			digest, path, size, created_at
 		)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP)
+		ON CONFLICT (artifact_id) DO NOTHING
 		RETURNING created_at`,
 		input.ID,
 		input.RunID,
@@ -136,6 +139,25 @@ func (store *PostgresArtifactStore) Write(
 		finalPath,
 		size,
 	).Scan(&createdAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		existing, loadErr := store.Get(ctx, input.ID)
+		if loadErr != nil {
+			return ArtifactRecord{}, fmt.Errorf("load idempotent artifact: %w", loadErr)
+		}
+		if existing.RunID != input.RunID ||
+			existing.AttemptID != input.AttemptID ||
+			existing.Type != input.Type ||
+			existing.Digest != digest ||
+			existing.Path != finalPath ||
+			existing.Size != size {
+			return ArtifactRecord{}, fmt.Errorf(
+				"%w: artifact_id=%q conflicts with durable Artifact",
+				ErrIdempotencyConflict,
+				input.ID,
+			)
+		}
+		return existing, nil
+	}
 	if err != nil {
 		return ArtifactRecord{}, fmt.Errorf("register complete artifact: %w", err)
 	}
@@ -149,6 +171,105 @@ func (store *PostgresArtifactStore) Write(
 		Size:      size,
 		CreatedAt: createdAt.UTC().Format(time.RFC3339Nano),
 	}, nil
+}
+
+// Get loads registered Artifact metadata. Callers that need integrity after
+// registration must still re-hash the referenced bytes.
+func (store *PostgresArtifactStore) Get(ctx context.Context, artifactID string) (ArtifactRecord, error) {
+	var record ArtifactRecord
+	var attemptID *string
+	var createdAt time.Time
+	err := store.events.pool.QueryRow(ctx, `
+		SELECT artifact_id, run_id, attempt_id, artifact_type,
+			digest, path, size, created_at
+		FROM artifacts
+		WHERE artifact_id = $1`,
+		artifactID,
+	).Scan(
+		&record.ID,
+		&record.RunID,
+		&attemptID,
+		&record.Type,
+		&record.Digest,
+		&record.Path,
+		&record.Size,
+		&createdAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ArtifactRecord{}, ErrArtifactNotFound
+	}
+	if err != nil {
+		return ArtifactRecord{}, fmt.Errorf("load Artifact: %w", err)
+	}
+	if attemptID != nil {
+		record.AttemptID = *attemptID
+	}
+	record.CreatedAt = createdAt.UTC().Format(time.RFC3339Nano)
+	return record, nil
+}
+
+// Verify reloads registered metadata and re-hashes the durable bytes. Receipt
+// recovery must use this method before trusting an Artifact-backed completion.
+func (store *PostgresArtifactStore) Verify(ctx context.Context, artifactID string) (ArtifactRecord, error) {
+	if err := ctx.Err(); err != nil {
+		return ArtifactRecord{}, err
+	}
+	record, err := store.Get(ctx, artifactID)
+	if err != nil {
+		return ArtifactRecord{}, err
+	}
+	relativePath, err := filepath.Rel(store.root, record.Path)
+	if err != nil ||
+		relativePath == "." ||
+		relativePath == ".." ||
+		filepath.IsAbs(relativePath) ||
+		strings.HasPrefix(relativePath, ".."+string(filepath.Separator)) {
+		return ArtifactRecord{}, fmt.Errorf(
+			"%w: artifact_id=%q path is outside the configured root",
+			ErrArtifactIntegrity,
+			artifactID,
+		)
+	}
+	if err := verifyArtifactRecordBytes(record); err != nil {
+		return ArtifactRecord{}, err
+	}
+	return record, nil
+}
+
+func verifyArtifactRecordBytes(record ArtifactRecord) error {
+	file, err := os.Open(record.Path)
+	if err != nil {
+		return fmt.Errorf(
+			"%w: artifact_id=%q open bytes: %v",
+			ErrArtifactIntegrity,
+			record.ID,
+			err,
+		)
+	}
+	defer file.Close()
+	hasher := sha256.New()
+	size, err := io.Copy(hasher, file)
+	if err != nil {
+		return fmt.Errorf(
+			"%w: artifact_id=%q hash bytes: %v",
+			ErrArtifactIntegrity,
+			record.ID,
+			err,
+		)
+	}
+	digest := fmt.Sprintf("sha256:%x", hasher.Sum(nil))
+	if digest != record.Digest || size != record.Size {
+		return fmt.Errorf(
+			"%w: artifact_id=%q metadata_digest=%q actual_digest=%q metadata_size=%d actual_size=%d",
+			ErrArtifactIntegrity,
+			record.ID,
+			record.Digest,
+			digest,
+			record.Size,
+			size,
+		)
+	}
+	return nil
 }
 
 func validArtifactIdentifier(value string) bool {

@@ -651,6 +651,30 @@ func TestArtifactRegisteredOnlyAfterCompleteDigestWrite(t *testing.T) {
 	if filepath.Dir(record.Path) == "" {
 		t.Fatalf("artifact path is not durable: %q", record.Path)
 	}
+	replayed, err := artifacts.Write(ctx, ArtifactInput{
+		ID:        completeArtifactID,
+		RunID:     runID,
+		AttemptID: runID + ":attempt:1",
+		Type:      "test-log",
+		Content:   bytes.NewReader(content),
+	})
+	if err != nil {
+		t.Fatalf("Write(idempotent Artifact replay) error = %v", err)
+	}
+	if !reflect.DeepEqual(replayed, record) {
+		t.Fatalf("idempotent Artifact replay = %#v, want %#v", replayed, record)
+	}
+	var completeRows int
+	if err := postgres.pool.QueryRow(
+		ctx,
+		`SELECT count(*) FROM artifacts WHERE artifact_id = $1`,
+		completeArtifactID,
+	).Scan(&completeRows); err != nil {
+		t.Fatalf("query idempotent Artifact rows: %v", err)
+	}
+	if completeRows != 1 {
+		t.Fatalf("idempotent Artifact row count = %d, want 1", completeRows)
+	}
 }
 
 type failingReader struct {

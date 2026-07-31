@@ -2,7 +2,7 @@
 
 AgentDock Verify is a managed runtime for Eino-based coding agents that is designed to make execution recoverable, sandboxed, deterministic to verify, and replayable.
 
-The five-week MVP is an engineering demonstration, not a claim of production-scale multi-tenancy or a strong security boundary. The repository is currently at **phase 2: durable PostgreSQL Event Store and reconciliation**. It has a pure reducer/decider, program-owned transitions, a framework-neutral `Reasoner` seam with `FakeReasoner`, compatible memory and PostgreSQL Event Stores, transactional version CAS, verified checkpoints, digest-addressed Artifact registration, one Reconcile path, and a durable CLI. Worker registration, lease behavior and fencing, sandboxing, real Eino integration, verifiers, repair, replay, and telemetry remain unimplemented.
+The five-week MVP is an engineering demonstration, not a claim of production-scale multi-tenancy or a strong security boundary. The repository is currently at **phase 3: Worker lease, fencing, and crash recovery**. It has a pure reducer/decider, PostgreSQL Event Log, transactional version CAS, verified checkpoints, Worker registration/heartbeat, TTL lease takeover, monotonically increasing fencing tokens, stable action IDs, durable Action Receipts, real Worker-process Kill chaos, and one normal/recovery Reconcile path. Sandboxing/worktrees/Tool Policy, real Eino integration, verifiers, repair resolution, replay products, and telemetry remain unimplemented.
 
 The project contract and sole construction plan is [`AgentDock-Verify-施工计划.md`](AgentDock-Verify-施工计划.md). The frozen five-week scope is restated in [`docs/scope.md`](docs/scope.md).
 
@@ -23,9 +23,9 @@ flowchart LR
     V --> F["Evidence artifacts"]
 ```
 
-Phase 1 defined the minimal framework-neutral Reasoner seam and `FakeReasoner`; Controller depends only on that seam. Phase 2 makes PostgreSQL events the authority without changing that Controller path. Phase 5 adds `EinoReasoner`, `ReplayReasoner`, and streaming/tool/usage/finish/error normalization behind it, while revalidating Fake compatibility. Eino types never cross into Controller. AgentDock owns lifecycle, persistence, and the later lease/fencing, sandbox policy, verification, fault injection, telemetry, and replay layers.
+Phase 1 defined the minimal framework-neutral Reasoner seam and `FakeReasoner`; Controller depends only on that seam. Phase 2 made PostgreSQL events authoritative. Phase 3 adds leased workers and Receipt-guided recovery without changing the reducer/decision ownership boundary. Phase 5 adds `EinoReasoner`, `ReplayReasoner`, and streaming/tool/usage/finish/error normalization behind the seam. Eino types never cross into Controller.
 
-## Phase 2 check
+## Phase 3 check
 
 Prerequisites:
 
@@ -46,13 +46,17 @@ make test-race
 make lint
 make test-integration
 make test-rebuild-state
+go test -tags=integration ./internal/lease/... ./internal/controller/...
+go test -tags=chaos ./internal/controller/...
+make chaos-worker-kill
+make demo-phase3
 make demo-fake
 git diff --check
 ```
 
 `make demo-fake` keeps the fast memory-backed deterministic path. `make test-integration` exercises PostgreSQL transaction rollback, version competition, idempotency, reconnect, checkpoints, Artifacts, migration atomicity, and fresh-process Controller recovery. `make doctor` validates the pinned Go toolchain, Docker daemon, Compose, configured ports, required example parameters, YAML syntax, and the Compose model. A busy configured port is accepted only when the expected service in this Compose project publishes that exact host/container-port mapping.
 
-The sample values in `.env.example` are local-only defaults, not production credentials. Live model credentials are not required in phase 2 and will never be a default CI dependency.
+The sample values in `.env.example` are local-only defaults, not production credentials. Live model credentials are not required in phase 3 and will never be a default CI dependency.
 
 ## Durable CLI
 
@@ -70,7 +74,7 @@ Standalone `run` commands reject a missing `AGENTDOCK_DATABASE_URL`; they never 
 
 ## Consistency and security claims
 
-This phase does not claim exactly-once. PostgreSQL makes event append and Run version update atomic, while external actions still cannot share that transaction. Lease and fencing behavior begins only in phase 3.
+This phase does not claim exactly-once. PostgreSQL makes Event append, Run version, and fencing validation atomic, while an external action still cannot share that transaction. The implemented claim is at-least-once plus scoped idempotency and fencing. An unsafe ambiguous outcome enters `WaitingApproval`.
 
 Docker reduces accidental and common hostile access, but a container shares the host kernel and is not a strong multi-tenant isolation boundary. The MVP must run untrusted code only on a dedicated development machine or disposable runner appropriate for the risk.
 

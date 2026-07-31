@@ -2,7 +2,7 @@
 
 ## Authority
 
-The PostgreSQL event log is the authoritative record for a Run in phase 2. Derived Run rows and checkpoints are disposable caches that do not replace ordered events. Phase 2 verifies a checkpoint by re-reducing its event prefix and therefore makes no checkpoint read-acceleration claim. A process restart can discard all in-memory state and rebuild from durable data; an inconsistent checkpoint falls back to complete Event Log reduction.
+The PostgreSQL event log is the authoritative lifecycle record for a Run. Derived Run rows and checkpoints are disposable caches that do not replace ordered events. Phase 3 recovery additionally consults a durable Action Receipt by stable `action_id` to resolve the external-action/completion-event gap. A process restart or lease takeover can discard all in-memory state and rebuild from those durable facts.
 
 ## Event envelope
 
@@ -52,6 +52,17 @@ RunCancelled
 
 Phase 2 persists the narrow, versioned `EventData` payload used by deterministic success, Pause/Resume/Cancel, and controlled reasoner-failure paths. Later-phase payload semantics remain deferred.
 
+Phase 3 adds the generic managed-action facts:
+
+```text
+ActionPlanned
+ActionCompleted
+ActionFailed
+```
+
+The earlier lifecycle-specific events remain supported for the phase-1 memory
+demo and phase-2 compatibility trace.
+
 ## Intent, execution, and result
 
 An external action uses a stable `action_id`:
@@ -59,7 +70,7 @@ An external action uses a stable `action_id`:
 ```text
 ActionPlanned(action_id, input_digest, fencing_token)
 → external execution
-→ ActionCompleted(action_id, receipt, output_digest)
+→ ActionCompleted(action_id, receipt, output_digest, artifact_id, artifact_digest)
    or ActionFailed(action_id, error_class, evidence_ref)
 ```
 
@@ -75,9 +86,9 @@ In phase 1, Pause rejects a new planned fact but does not reject the matching re
 - **After execution, before completion append:** search by `action_id` and validate the external receipt before retrying.
 - **After completion append:** completion is authoritative and the action must not run again.
 
-## Lease takeover (phase 3)
+## Lease takeover
 
-The phase 2 schema includes `leases`, but no lease operation or fencing check is implemented. In phase 3, lease expiry will permit a new worker to acquire a larger fencing token without assuming the old process stopped; delayed stale writes will then be rejected.
+Lease expiry permits a new Worker to acquire a strictly larger fencing token without assuming the old process stopped. Every generic action Event and Action Receipt is lease-sensitive. PostgreSQL rejects a missing, mismatched, expired, or stale Worker/token before accepting even an idempotent replay. These checks use wall-clock database time after transaction lock waits, not PostgreSQL's transaction-start timestamp.
 
 ## Event Replay versus Execution Replay
 
@@ -89,7 +100,7 @@ A divergence is evidence to investigate, not a reason to mutate the source event
 
 ## Artifact relationship
 
-Large output, patches, verifier logs, cassettes, and trace evidence live outside event payloads. Phase 2 writes Artifact bytes to a temporary file, hashes and syncs them, closes and atomically renames the complete file, and only then registers metadata with database time. The digest records the bytes present at registration. Phase 2 does not make the file read-only, reject later Artifact metadata updates/deletes, or otherwise provide a strong post-registration immutability guarantee; consumers that need later integrity must re-hash the bytes. Events can reference an Artifact by ID and digest. Verification evidence later binds to:
+Large output, patches, verifier logs, cassettes, and trace evidence live outside event payloads. Phase 2 writes Artifact bytes to a temporary file, hashes and syncs them, closes and atomically renames the complete file, and only then registers metadata with database time. The digest records the bytes present at registration. Phase 2 does not make the file read-only, reject later Artifact metadata updates/deletes, or otherwise provide a strong post-registration immutability guarantee. Phase 3 therefore gives Receipt Artifact IDs a database foreign key, keeps the canonical inline-output digest separate from the Artifact-byte digest, and binds ApplyPatch evidence to its stable action ID, Run, planned Attempt, phase-3 Artifact type, and digest. Both Controller recovery and PostgreSQL `ActionCompleted` append validation re-hash the registered bytes; missing, changed, or cross-Run evidence cannot advance the Run and recovery enters `WaitingApproval`. Events can reference an Artifact by ID and digest. Verification evidence later binds to:
 
 ```text
 run_id

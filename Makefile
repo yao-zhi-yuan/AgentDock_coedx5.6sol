@@ -11,10 +11,10 @@ DATABASE_URL ?= postgres://agentdock:agentdock_dev_only@127.0.0.1:55433/agentdoc
 .PHONY: help doctor compose-config \
 	lint test test-race test-integration test-chaos security-test \
 	migrate demo-fake demo-eino-recorded sandbox-security-test \
-	chaos-worker-kill test-rebuild-state e2e-recorded e2e-replay e2e-live
+	chaos-worker-kill demo-phase3 test-rebuild-state e2e-recorded e2e-replay e2e-live
 
 help:
-	@echo "AgentDock Verify — phase 2 durable event store"
+	@echo "AgentDock Verify — phase 3 lease, fencing, and crash recovery"
 	@echo "  make doctor          Validate the development environment"
 	@echo "  make compose-config  Parse the pinned Docker Compose configuration"
 	@echo "  make lint            Run Go static analysis"
@@ -23,8 +23,10 @@ help:
 	@echo "  make migrate         Apply PostgreSQL migrations"
 	@echo "  make test-integration Run PostgreSQL integration tests"
 	@echo "  make test-rebuild-state Verify golden, 1000-event, and checkpoint rebuilds"
+	@echo "  make chaos-worker-kill Kill 100 Worker processes and verify takeover convergence"
+	@echo "  make demo-phase3     Demonstrate two-Worker kill/takeover/fencing recovery"
 	@echo "  make demo-fake       Demonstrate a fake Run and pause/resume"
-	@echo "  Later-phase targets remain intentionally unavailable"
+	@echo "  Phase 4+ targets remain intentionally unavailable"
 
 doctor:
 	@EXPECTED_GO_TOOLCHAIN="$(GO_TOOLCHAIN)" DOCTOR_ENV="$(DOCTOR_ENV)" COMPOSE_FILE="$(COMPOSE_FILE)" ./scripts/doctor.sh
@@ -42,10 +44,10 @@ test-race:
 	@go test -race ./...
 
 test-integration:
-	@AGENTDOCK_DATABASE_URL="$(DATABASE_URL)" go test -tags=integration ./internal/store/... ./internal/controller/... ./internal/migration/... ./cmd/agentdock
+	@AGENTDOCK_DATABASE_URL="$(DATABASE_URL)" go test -tags=integration ./internal/store/... ./internal/lease/... ./internal/controller/... ./internal/migration/... ./cmd/agentdock
 
 test-chaos:
-	@./scripts/not-implemented.sh "test-chaos" "phase 3"
+	@AGENTDOCK_DATABASE_URL="$(DATABASE_URL)" go test -tags=chaos -count=1 ./internal/controller/...
 
 security-test:
 	@./scripts/not-implemented.sh "security-test" "phase 4"
@@ -63,7 +65,10 @@ sandbox-security-test:
 	@./scripts/not-implemented.sh "sandbox-security-test" "phase 4"
 
 chaos-worker-kill:
-	@./scripts/not-implemented.sh "chaos-worker-kill" "phase 3"
+	@AGENTDOCK_DATABASE_URL="$(DATABASE_URL)" go test -tags=chaos -count=1 -v ./internal/controller -run TestWorkerKillChaos100Converges
+
+demo-phase3:
+	@AGENTDOCK_DATABASE_URL="$(DATABASE_URL)" go test -tags=integration -count=1 -v ./internal/controller -run TestTwoWorkerKillTakeoverRejectsRestartedStaleToken
 
 test-rebuild-state:
 	@go test -count=1 ./internal/domain -run 'TestReduceGoldenEventsMatchesGoldenStateFieldByField|TestReduceFromCheckpointMatchesFullReductionAcross1000Events'

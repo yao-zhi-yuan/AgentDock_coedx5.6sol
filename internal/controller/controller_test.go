@@ -435,6 +435,23 @@ func TestSetDesiredStateRejectsTerminalRun(t *testing.T) {
 	}
 }
 
+func TestSetDesiredStateRetriesVersionConflict(t *testing.T) {
+	ctx := context.Background()
+	eventStore := &desiredStateConflictOnceStore{inner: store.NewMemoryEventStore()}
+	reconciler := controller.New(eventStore, reasoner.NewFakeReasoner())
+	mustCreate(t, ctx, reconciler, "run-desired-conflict")
+
+	state, err := reconciler.SetDesiredState(ctx, "run-desired-conflict", domain.DesiredPaused)
+	if err != nil {
+		t.Fatalf("SetDesiredState(Paused) error = %v", err)
+	}
+	if state.Run.DesiredState != domain.DesiredPaused ||
+		state.Run.ObservedState != domain.StatusPaused ||
+		eventStore.Conflicts() != 1 {
+		t.Fatalf("state=%#v injected_conflicts=%d", state.Run, eventStore.Conflicts())
+	}
+}
+
 func mustCreate(t *testing.T, ctx context.Context, reconciler *controller.Controller, runID string) {
 	t.Helper()
 	if _, err := reconciler.CreateRun(ctx, controller.CreateRunRequest{RunID: runID, ScenarioID: "scenario", SpecHash: "spec"}); err != nil {
@@ -518,6 +535,43 @@ type blockingVerificationStore struct {
 	entered chan struct{}
 	release chan struct{}
 	once    sync.Once
+}
+
+type desiredStateConflictOnceStore struct {
+	inner     *store.MemoryEventStore
+	mu        sync.Mutex
+	conflicts int
+}
+
+func (conflict *desiredStateConflictOnceStore) Load(ctx context.Context, runID string) ([]domain.Event, error) {
+	return conflict.inner.Load(ctx, runID)
+}
+
+func (conflict *desiredStateConflictOnceStore) Rebuild(ctx context.Context, runID string) (domain.State, error) {
+	return conflict.inner.Rebuild(ctx, runID)
+}
+
+func (conflict *desiredStateConflictOnceStore) Append(
+	ctx context.Context,
+	expectedVersion uint64,
+	event domain.Event,
+) (store.AppendResult, error) {
+	conflict.mu.Lock()
+	if event.Type == domain.EventDesiredStateChanged && conflict.conflicts == 0 {
+		conflict.conflicts++
+		conflict.mu.Unlock()
+		return store.AppendResult{}, &store.VersionConflictError{
+			RunID: event.RunID, Expected: expectedVersion, Actual: expectedVersion + 1,
+		}
+	}
+	conflict.mu.Unlock()
+	return conflict.inner.Append(ctx, expectedVersion, event)
+}
+
+func (conflict *desiredStateConflictOnceStore) Conflicts() int {
+	conflict.mu.Lock()
+	defer conflict.mu.Unlock()
+	return conflict.conflicts
 }
 
 func newBlockingVerificationStore() *blockingVerificationStore {
