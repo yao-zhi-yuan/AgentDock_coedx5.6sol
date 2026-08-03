@@ -1,0 +1,41 @@
+README.md
+  s_acabfe08bec339::t_d6c4a9a36342a7 54
+cmd/sandbox-demo/main.go
+  s_acabfe08bec339::t_302ec63b68b52b 33,49-51,87-91,96-100,144-146
+docs/adr/0003-docker-sandbox.md
+  s_acabfe08bec339::t_bc8aaf7a0ed9bb 49-59
+docs/architecture.md
+  s_acabfe08bec339::t_b7654e01c3b62f 164-171,194-199
+docs/demo.md
+  s_acabfe08bec339::t_fce32bc9a6628f 64-69
+docs/threat-model.md
+  s_acabfe08bec339::t_f9052b57e222c9 138-145
+internal/sandbox/docker.go
+  s_acabfe08bec339::t_cf7aed541cdd4d 29-33,47-52,74-77,81-82,97-100,102-107,109,111,115,117-118,120,122,126-179,326,356-369,376-379,393,417,438,688,692-695,697-699,771-777,838-841,849-851,958-961,963,968,973,985,1026-1040,1042,1044-1045,1047-1081,1083-1114,1127,1130-1134,1141,1143-1146,1149-1162,1167-1174,1183-1187,1190-1192,1196-1203,1243,1248
+internal/sandbox/docker_integration_test.go
+  s_acabfe08bec339::t_4e1784fc5aefeb 398-541
+internal/sandbox/sandbox_test.go
+  s_acabfe08bec339::t_4c080d2ad8e531 7,187-363,434-443,485-494
+internal/sandbox/worktree.go
+  s_acabfe08bec339::t_4f55d674761eed 12,21-30,38-39,112-116,118,120-123,125-126,129,133,137-140,152-253,258,286-290,299-301,507,514,522-527,535-552
+internal/sandbox/worktree_integration_test.go
+  s_acabfe08bec339::t_8964da5fd18e57 7,71-166
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "9cc0c54685336fa5241f0014a3e852e51f8014e8",
+  "prompts": {},
+  "sessions": {
+    "s_acabfe08bec339": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fb71f-186d-7f70-8d23-57fdc31e367f",
+        "model": "unknown"
+      },
+      "human_author": "yaozhiyuan.123 <yaozhiyuan.123@bytedance.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
