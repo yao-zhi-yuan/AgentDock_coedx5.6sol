@@ -2,7 +2,7 @@
 
 ## Scope and current status
 
-This threat model covers the five-week local MVP through phase 4. Controls assigned to later phases remain described as planned.
+This threat model covers the five-week local MVP through phase 5. Controls assigned to later phases remain described as planned.
 
 The MVP is not a multi-tenant service and must not be presented as one.
 
@@ -38,16 +38,16 @@ The model output, target repository, generated patch, tool arguments, and sandbo
 
 | Threat | Planned control | Residual risk |
 |---|---|---|
-| Prompt/tool injection | **Implemented in phase 4:** five fixed contracts, input/output JSON Schema, capability/path/network/budget policy | semantic manipulation within allowed operations |
+| Prompt/tool injection | **Implemented through phase 5:** fixed System Contract, five Tool Contracts, output normalization, Tool name/input Schema rejection, and phase-4 policy | semantic manipulation within allowed operations |
 | Path traversal | **Implemented in phase 4:** lexical normalization, allowlists, host symlink checks, container-side `os.Root` I/O | filesystem/kernel implementation flaws |
 | Host modification | **Implemented in phase 4:** no-checkout worktree, hook/filter-free fixed Git materialization, sanitized worktree pointer, source checkout not mounted, no host-shell tool | trusted host Git and Docker daemon still read repository objects and manage the bind mount |
 | Network exfiltration | **Implemented in phase 4:** `network=none`; no network-enabled Tool Contract | host-side future model call still leaves the machine |
-| Credential leakage | **Implemented in phase 4 execution:** scrubbed host Git environment, lazy fetch disabled, empty production caller-environment allowlist, fixed Go environment, audit of key names only | image/operator/provider misconfiguration |
+| Credential leakage | **Implemented through phase 5:** phase-4 execution controls plus no-credential Fake/Replay, credential-marker rejection in cassettes, sanitized provider errors, and external-only live configuration | image/operator/provider misconfiguration or sensitive prompt/repository text |
 | Container breakout | **Implemented in phase 4:** non-root, read-only root, dropped capabilities, no-new-privileges, bounded resources | shared kernel means breakout cannot be ruled out |
 | Denial of service | **Implemented in phase 4:** CPU/memory/PID/time/output limits plus kill/remove and worktree cleanup | disk pressure or Docker daemon impact |
 | Stale or identity-less execution writes | **Implemented in phase 3:** durable Lease-row mode, PostgreSQL owner/token/expiry checks, legacy-event rejection, and reducer mixed-path defense | non-database side effect must still be scoped-idempotent/receipted |
 | Forged verifier success | verifier identity/role and digest-bound evidence | compromised verifier worker or store |
-| Replay disclosure | redacted immutable cassettes, credential scanning | prompts or repository text may still be sensitive |
+| Replay disclosure | **Partially implemented in phase 5:** normalized cassette schema and credential-marker scanning; no raw provider payloads | prompts or repository text may still be sensitive; strong immutable storage is later work |
 | Replay false equivalence | pinned versions/digests and explicit divergence | unavoidable external or platform nondeterminism |
 | Event tampering | transactional append, uniqueness, audit metadata | trusted database administrator can alter data |
 
@@ -151,3 +151,40 @@ Residual risks remain: Docker Desktop/daemon and the shared kernel are trusted;
 disk exhaustion is not completely bounded; repositories without vendored or
 image-preloaded modules can fail `go test` because network is deliberately
 disabled; and a malicious kernel or daemon can defeat these controls.
+
+## Phase 5 Reasoner and recorded-agent controls
+
+- `reasoner.Request` has exactly five fields: Messages, Tool Contracts, task
+  summary, failure evidence, and Budget. Runtime Run/Attempt scope is outside
+  the model input.
+- Normalized output has only Text Delta, Tool Call, Usage, Finish, and Error.
+  Unknown Tools and arguments outside the registered input Schema become
+  terminal non-retryable errors before Tool invocation.
+- The fixed System Contract is the only system-authority message accepted by
+  the adapter. Task summary and failure evidence are escaped into delimited
+  JSON and presented as lower-authority user data.
+- Streaming interruption becomes a retryable normalized error. Provider
+  authentication, rate-limit, invalid-request, timeout/unavailable, and
+  cancellation classes use stable messages rather than copying raw errors.
+- Every successful phase-5 turn requires exactly one Usage event before
+  Finish. Missing/duplicate Usage, decreasing Eino counters, or token usage
+  beyond the current budget closes the source stream and emits a terminal
+  error. The Coding Agent also enforces the cumulative budget across turns.
+- Eino imports are confined to `internal/reasoner/eino`. Reasoner production
+  packages have no direct database, Store, Sandbox, process, or host-filesystem
+  imports. Registry contracts are immutable snapshots, and Coding Agent checks
+  the complete Reasoner/Service contract set (including Schemas, paths, network,
+  time/output limits, capability, and idempotency) before Reasoner runs. Every
+  Coding Agent Tool call is then passed to that existing Tool Service.
+- Fake and Replay require no credential. Committed normalized cassettes carry
+  explicit recorded/redacted metadata, pass event-order and terminal-state
+  validation, and are scanned before and after JSON decoding for common
+  credential shapes; the recorded demo repairs two fixed scenarios only in
+  disposable Docker worktrees. These scans reduce accidental disclosure but
+  do not replace operator review or a dedicated secret scanner.
+
+This phase does not implement phase-6 verifier authority, repair, or evidence,
+and does not implement phase-7 Event Replay, divergence evidence, OTel, or
+fault injection. A live model still sends selected prompt/repository context to
+its externally configured provider and must be used only with an operator-
+approved data policy.

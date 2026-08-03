@@ -2,7 +2,7 @@
 
 AgentDock Verify is a managed runtime for Eino-based coding agents that is designed to make execution recoverable, sandboxed, deterministic to verify, and replayable.
 
-The five-week MVP is an engineering demonstration, not a claim of production-scale multi-tenancy or a strong security boundary. The repository is currently at **phase 4: Docker sandbox, disposable Git worktrees, Tool Contract, and static Policy**. It retains phase 3's pure reducer/decider, PostgreSQL Event Log, Worker lease/fencing, durable Action Receipts, and crash recovery, and adds an attempt-scoped no-checkout worktree, a non-root/read-only/no-network Docker execution layer, bounded resources/time/combined output, an empty-by-default caller environment allowlist, scope-bound container ownership, five declared repository tools, default-deny YAML policy, and JSONL audit artifacts. Eino/ReplayReasoner, real model use, verifier/repair, product replay, telemetry, Kubernetes, UI, and MCP remain unimplemented.
+The five-week MVP is an engineering demonstration, not a claim of production-scale multi-tenancy or a strong security boundary. The repository contains the **phase 5 candidate: Eino Adapter and recorded Coding Agent**. It retains the phase-3 recovery semantics and phase-4 Docker/Tool/Policy boundary, and adds a framework-neutral streaming Reasoner contract, credential-free Fake/Replay modes, an Eino-only adapter package, provider-error normalization, fail-closed token accounting, a fixed Coding Agent System Contract, one example Go repository, and two recorded Bug Scenarios. Automated Gate 5 and independent review evidence are recorded in `docs/status/phase-5.md`; optional Live Model/manual acceptance remains pending. Phase 6 verifier/evidence/repair, phase 7 product replay/OTel/fault injection, Kubernetes, UI, MCP, and multi-tenancy remain unimplemented.
 
 The project contract and sole construction plan is [`AgentDock-Verify-施工计划.md`](AgentDock-Verify-施工计划.md). The frozen five-week scope is restated in [`docs/scope.md`](docs/scope.md).
 
@@ -25,7 +25,7 @@ flowchart LR
 
 Phase 1 defined the minimal framework-neutral Reasoner seam and `FakeReasoner`; Controller depends only on that seam. Phase 2 made PostgreSQL events authoritative. Phase 3 adds leased workers and Receipt-guided recovery without changing the reducer/decision ownership boundary. Phase 5 adds `EinoReasoner`, `ReplayReasoner`, and streaming/tool/usage/finish/error normalization behind the seam. Eino types never cross into Controller.
 
-## Phase 4 check
+## Phase 5 check
 
 Prerequisites:
 
@@ -55,6 +55,9 @@ make sandbox-image
 go test -tags=integration ./internal/sandbox/...
 make sandbox-security-test
 make demo-phase4
+go test ./internal/reasoner/...
+go test -tags=integration ./internal/reasoner/...
+make demo-eino-recorded
 make demo-fake
 git diff --check
 ```
@@ -63,7 +66,9 @@ git diff --check
 
 `make sandbox-security-test` builds the helper image from a digest-pinned Go base and then runs real Docker/worktree negative acceptance. `make demo-phase4` creates a local fixture repository, records its digest and Git status, invokes all five tools through contract/schema/policy/audit, applies a worktree-only patch, rejects `/etc/passwd`, runs a test that attempts network access, destroys the sandbox, and proves the fixture origin is unchanged. It requires no model credential.
 
-The sample values in `.env.example` are local-only defaults, not production credentials. Live model credentials are not required in phase 4 and will never be a default CI dependency.
+`make demo-eino-recorded` replays two committed normalized cassettes. Each cassette carries explicit recorded/redacted markers, contains exactly one Usage event before each Finish, and passes terminal-order plus credential-shape validation; those markers are self-declared fixture metadata, not provenance or a substitute for operator review. Each Scenario binds the Reasoner-visible contract, Tool Service, and Policy to its own `allowedPath`; Coding Agent rejects a complete-contract mismatch before Reasoner runs. It routes `repo.read`, `repo.apply_patch`, and `repo.test` through the same phase-4 Tool Service and Docker Sandbox, then proves each temporary origin repository is unchanged and no owned container remains. This is model-dependency replay, not phase-7 Event Replay or phase-6 verification evidence.
+
+The sample values in `.env.example` are local-only defaults, not production credentials. Fake/Replay and CI require no model credential. A live Eino `ChatModel` is an optional manual injection; any credential must come from external secure configuration and must never enter the repository, events, cassettes, logs, or status reports.
 
 ## Durable CLI
 

@@ -52,6 +52,33 @@ func TestBuiltinContractsAreCompleteAndLimitedToPhase4Surface(t *testing.T) {
 	}
 }
 
+func TestRegistryOwnsAndReturnsImmutableContractSnapshots(t *testing.T) {
+	registry, err := NewBuiltinRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	contracts := registry.Contracts()
+	if len(contracts) == 0 {
+		t.Fatal("Registry.Contracts returned no contracts")
+	}
+	name := contracts[0].Name
+	contracts[0].Name = "host.exec"
+	contracts[0].AllowedPaths[0] = "/"
+	contracts[0].InputSchema[0] = 'x'
+	contract, ok := registry.Get(name)
+	if !ok {
+		t.Fatalf("registry lost %q after snapshot mutation", name)
+	}
+	if contract.Name != name || contract.AllowedPaths[0] == "/" || contract.InputSchema[0] == 'x' {
+		t.Fatalf("caller mutation changed Registry contract: %#v", contract)
+	}
+	contract.AllowedPaths[0] = "/"
+	again, _ := registry.Get(name)
+	if again.AllowedPaths[0] == "/" {
+		t.Fatal("Registry.Get returned caller-mutable contract backing storage")
+	}
+}
+
 func TestContractValidationRejectsMissingUnknownAndWrongTypedInput(t *testing.T) {
 	registry, err := NewBuiltinRegistry()
 	if err != nil {

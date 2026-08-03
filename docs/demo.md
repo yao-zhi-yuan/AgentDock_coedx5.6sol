@@ -129,3 +129,43 @@ lazy-fetch helper executes. Cleanup failures are explicit on normal, non-zero,
 timeout, and cancellation paths; once Destroy starts, execution cannot resume.
 Docker remains a local MVP risk-reduction boundary, not strong multi-tenant
 isolation.
+
+## Phase 5 recorded Eino/Coding Agent demonstration
+
+The required CI-safe phase-5 demo uses no model credential:
+
+```bash
+make demo-eino-recorded
+```
+
+It loads two committed normalized Reasoner cassettes for the fixed
+`normalize-name` and `divide-zero` Bug Scenarios. Loading requires explicit
+`recording_mode=recorded` and `redacted=true` metadata, exactly one Usage before
+each successful Finish, a valid terminal ordering, and no detected common
+credential shape. For each scenario it creates
+a temporary Git origin from `examples/buggy-go-service`, provisions a detached
+Docker worktree, and runs this recorded sequence:
+
+```text
+ReplayReasoner
+→ repo.read
+→ repo.apply_patch
+→ repo.test
+→ recorded Finish
+```
+
+All three calls pass through the existing Tool Contract, input/output Schema,
+static Policy, Docker Sandbox, and audit path. The command succeeds only when
+the targeted package tests pass, the temporary origin commit/status are
+unchanged, the worktree is removed, and no provider-owned container remains.
+The `normalize-name` execution binds both its model-visible contract snapshot
+and Tool Service/Policy to `internal/user/`; `divide-zero` independently binds
+all three to `internal/mathutil/`. A unit regression requests the other
+Scenario path and proves denial occurs before the Sandbox is invoked.
+It prints `credentials=not-required` and explicitly states that phase-6
+verification is not implemented.
+
+A live Eino ChatModel may be injected manually into `EinoReasoner` using an
+external secure credential source. Live mode is not a CI gate, the repository
+does not ship a provider credential loader, and no credential or raw provider
+payload may be written to a cassette, log, event, or status report.

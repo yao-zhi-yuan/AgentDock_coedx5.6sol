@@ -354,13 +354,13 @@ type blockingReasoner struct {
 func (blocker blockingReasoner) Reason(
 	ctx context.Context,
 	request reasoner.Request,
-) (reasoner.Result, error) {
+) reasoner.Stream {
 	close(blocker.started)
 	select {
 	case <-blocker.release:
 		return reasoner.NewFakeReasoner().Reason(ctx, request)
 	case <-ctx.Done():
-		return reasoner.Result{}, ctx.Err()
+		return reasoner.NewErrorStream(request, reasoner.ClassifyProviderError(ctx.Err()))
 	}
 }
 

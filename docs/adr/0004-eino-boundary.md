@@ -29,3 +29,27 @@ The controller must not import Eino agent state. Eino cannot write the store, ex
 - Eino can evolve without redefining durable Run state.
 - Phase 5 adapter code must normalize streaming interruption, usage, tool calls, finish, and provider errors.
 - The boundary adds translation code but prevents framework state from becoming the runtime authority.
+
+## Phase 5 implementation note
+
+The implemented `reasoner.Request` is frozen to Messages, available Tool
+Contracts, current task summary, current failure evidence, and Budget. It does
+not carry Run/Attempt identity, Store handles, Sandbox handles, or provider
+configuration. The runtime-owned output stream contains only Text Delta, Tool
+Call, Usage, Finish, and Error variants.
+
+`internal/reasoner/eino` is the only production package allowed to import Eino.
+It accepts an injected `model.BaseChatModel`, installs the fixed System
+Contract as the sole system-authority message, converts internal messages and
+complete Tool Contract JSON Schemas, preserves atomic Tool-call ID/name fields
+while joining only argument fragments, emits exactly one normalized Usage
+before Finish, and classifies both setup-time and asynchronous provider errors.
+It does not instantiate a provider, read credentials, write files, or execute
+Tools.
+
+The runtime `CodingAgent` keeps Run/Attempt Tool scope outside the Reasoner and
+requires the Reasoner-visible contracts to exactly match the immutable contract
+snapshot from its bound Tool Service before Reasoner is called. It then routes
+every normalized call through that Service. ReplayReasoner
+plays credential-scanned normalized cassettes; this is not Event Replay or the
+phase-7 divergence system. Controller continues to import no Eino type.

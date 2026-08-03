@@ -52,6 +52,20 @@ func NewService(
 	}
 }
 
+// Contracts returns the immutable execution-contract snapshot bound to this
+// Service. CodingAgent uses it to reject a model-visible contract drift before
+// calling Reasoner.
+func (service *Service) Contracts() ([]Contract, error) {
+	if service == nil || service.registry == nil {
+		return nil, errors.New("tool service registry is not configured")
+	}
+	contracts := service.registry.Contracts()
+	if len(contracts) == 0 {
+		return nil, errors.New("tool service registry has no contracts")
+	}
+	return contracts, nil
+}
+
 func (service *Service) Invoke(ctx context.Context, invocation Invocation) (Response, error) {
 	if service.registry == nil || service.policy == nil || service.sandbox == nil || service.audit == nil {
 		return Response{}, errors.New("tool service is not configured")

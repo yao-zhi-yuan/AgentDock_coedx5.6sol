@@ -10,7 +10,7 @@ Prepare → Reason → Act → Verify → Repair → Verify → Complete
 
 The project differentiates itself through durable state, crash recovery, concurrency control, isolated execution, deterministic verification, replay, and evidence—not through a general workflow engine.
 
-This contract was frozen in phase 0. Phase 4 retains the domain reducer/decider, framework-neutral Reasoner seam and FakeReasoner, compatible memory and PostgreSQL Event Stores, transactional Run-version CAS, verified checkpoints, Worker registration, leases, heartbeat, fencing, durable Action Receipts, crash takeover, and Worker CLI. It now implements the Tool Contract/static Policy seam and disposable Docker worktree execution. Eino, verifier/repair, replay products, and telemetry remain assigned to later phases.
+This contract was frozen in phase 0. Phase 5 retains the domain reducer/decider, Event Stores, leases/fencing/Receipts, and phase-4 Tool Contract/Policy/Docker boundary. It now implements a framework-neutral streaming Reasoner seam, compatible FakeReasoner, ReplayReasoner over normalized cassettes, and an Eino adapter confined to `internal/reasoner/eino`. Verifier/repair, Event Replay, divergence evidence, fault injection, and telemetry remain assigned to later phases.
 
 ## Request-to-artifact path
 
@@ -56,10 +56,11 @@ The end-to-end path is:
 | Controller | desired/observed lifecycle and reconcile decisions | model-internal state |
 | PostgreSQL store | ordered events, transactional run version/fencing checks, attempts, checkpoint cache, artifact metadata | artifact bytes or deciding action safety |
 | Worker | leased action execution | permanent authority |
-| Reasoner seam | framework-neutral request/result contract used by Controller | Eino/provider types and run lifecycle |
-| FakeReasoner | deterministic phase 1 reasoning for the pure state-machine demo | live models, Eino, streaming, replay |
+| Reasoner seam | five-input framework-neutral request and normalized Text/Tool/Usage/Finish/Error stream | Eino/provider types and run lifecycle |
+| FakeReasoner | deterministic phase-1-compatible and phase-5 Tool Contract streams | live models, Eino, credentials |
 | EinoReasoner adapter | phase 5 ChatModel, message, tool-call, streaming, usage, and error adaptation | leases, persistence, policy, verification |
-| ReplayReasoner | phase 5 deterministic playback of normalized recorded reasoner results | live model calls and event-log replay |
+| ReplayReasoner | phase 5 deterministic playback of credential-scanned normalized cassettes | live model calls, Event Replay, and phase-7 divergence evidence |
+| Coding Agent | bounded model/tool turns and transcript; routes calls through Tool Service | verification, repair, direct Sandbox/host access, lifecycle state |
 | Tool/policy layer | five versioned contracts, input/output schemas, capabilities, paths, network, time/output budgets, and audit | arbitrary host shell or deciding Run success |
 | Sandbox | one Run/Attempt worktree, immutable image ID, constrained Docker process execution, output capture, and cleanup | strong tenant isolation or phase-3 lifecycle authority |
 | Verifier | deterministic pass/fail evidence | accepting an agent's self-report |
@@ -70,9 +71,9 @@ The end-to-end path is:
 
 Phase 1 defines the minimum internal, framework-neutral `Reasoner` seam and implements `FakeReasoner`. This is required to drive one Run through the pure state machine without PostgreSQL, Docker, Eino, model credentials, streaming, or provider-specific concepts. The phase 1 result includes only the minimal internal tool-call representation needed to accept a valid fake result and turn an illegal fake tool call into a controlled failure; it does not implement the phase 4 Tool Contract or tool execution. Controller depends only on this internal seam.
 
-Phase 5 implements `EinoReasoner` and `ReplayReasoner`, plus normalization of streaming chunks, Eino/recorded tool calls, usage, finish, and provider errors into the internal result model. If those needs require evolving the phase 1 seam, changes must be additive or otherwise backward-compatible for the Controller and `FakeReasoner`; the seam is not replaced with an Eino interface.
+Phase 5 implements `EinoReasoner` and `ReplayReasoner`, plus normalization of streaming chunks, Eino/recorded tool calls, usage, finish, and provider errors. The Reasoner input is frozen to exactly Messages, available Tool Contracts, current task summary, current failure evidence, and Budget. The adapter installs the fixed Coding Agent System Contract as the sole authoritative system message; task summary and failure evidence are JSON-delimited user-level data. A successful phase-5 turn must emit exactly one Usage event before its terminal Finish, so missing or duplicate accounting fails closed. The Tool Registry owns deep immutable contract snapshots, and Coding Agent rejects any mismatch between the Reasoner-visible contracts and its bound Tool Service before calling Reasoner. Run/Attempt scope remains outside the model input and is added only when Coding Agent invokes that Service. Controller still imports only the internal Reasoner package.
 
-Eino supplies model and agent components: ChatModel, messages, tool calls, streaming, and adapter-level events. The controller must not import Eino agent state or concrete Eino types. Eino cannot write the event store, access the host filesystem, acquire leases, approve policy, create verification results, or decide a terminal Run state.
+Eino supplies ChatModel, messages, tool calls, streaming, and adapter-level events. The adapter converts internal messages and complete Tool Contract JSON Schemas to Eino values. It treats Tool-call ID/name as atomic fields, rejects conflicts, and concatenates only streamed arguments. A static architecture test rejects direct Eino imports outside the adapter and direct Store, Sandbox, database, process, or filesystem imports from Reasoner production packages; it is a direct-import confinement check, not a general transitive capability proof. Eino cannot write the event store, access the host filesystem, acquire leases, approve policy, create verification results, or decide a terminal Run state.
 
 ## Durable reconciliation
 
@@ -144,8 +145,8 @@ changed evidence. Malformed or changed evidence enters `WaitingApproval`.
 Phase 4 adds disposable worktrees and containers without changing this
 recovery interpretation. The Tool Service is an execution dependency behind a
 phase-3 `ActionExecutor`; it does not receive Event Store, Lease, or terminal
-state authority. Phase 5 may translate normalized Reasoner tool calls into
-this service, but phase 4 does not add that adapter. Actions outside the frozen
+state authority. Phase 5 translates normalized Reasoner tool calls into
+this service through `CodingAgent`; Reasoner itself does not import Sandbox. Actions outside the frozen
 MVP side-effect set are out of scope.
 
 ## Phase 4 execution boundary
@@ -250,7 +251,7 @@ It does not promise exactly-once because a crash can occur between an external s
 ## Replay definitions
 
 - **Event Replay** reduces the persisted event sequence to rebuild runtime state. It does not re-run a model or tool.
-- **Execution Replay** feeds recorded model/tool cassettes through the execution path to reproduce normalized decisions and evidence without live dependencies.
+- **Execution Replay** feeds recorded model/tool cassettes through the execution path to reproduce normalized decisions and evidence without live dependencies. Phase 5 implements only normalized Reasoner cassette playback plus a recorded Tool-path demo; phase-7 divergence comparison and product replay remain unimplemented.
 
 Execution Replay must report divergence when normalized output, workspace digest, spec hash, or verifier evidence differs. It must not rewrite historical events to hide the difference.
 

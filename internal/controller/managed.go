@@ -456,11 +456,11 @@ func (executor *reasonerActionExecutor) Execute(
 	if request.Command.Type != domain.CommandRunReasoner {
 		return ExecuteDeterministicAction(request)
 	}
-	result, err := executor.reasoner.Reason(ctx, reasoner.Request{
-		RunID:      request.State.Run.ID,
-		ScenarioID: request.State.Run.ScenarioID,
-		AttemptID:  request.State.AttemptID,
+	stream := executor.reasoner.Reason(ctx, reasoner.Request{
+		TaskSummary: request.State.Run.ScenarioID,
+		Budget:      reasoner.Budget{TokenLimit: 1},
 	})
+	result, err := reasoner.Collect(stream)
 	if err != nil {
 		return lease.ActionReceipt{}, fmt.Errorf("reasoner error: %w", err)
 	}

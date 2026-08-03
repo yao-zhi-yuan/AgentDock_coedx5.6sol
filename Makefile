@@ -16,7 +16,7 @@ SANDBOX_DOCKERFILE := deployments/sandbox/Dockerfile
 	chaos-worker-kill demo-phase3 test-rebuild-state e2e-recorded e2e-replay e2e-live
 
 help:
-	@echo "AgentDock Verify — phase 4 Docker sandbox, worktree, and policy"
+	@echo "AgentDock Verify — phase 5 Eino adapter and recorded Coding Agent"
 	@echo "  make doctor          Validate the development environment"
 	@echo "  make compose-config  Parse the pinned Docker Compose configuration"
 	@echo "  make lint            Run Go static analysis"
@@ -31,7 +31,8 @@ help:
 	@echo "  make sandbox-security-test Run Docker/worktree negative acceptance"
 	@echo "  make demo-phase4     Demonstrate isolated tools, denial, tests, and cleanup"
 	@echo "  make demo-fake       Demonstrate a fake Run and pause/resume"
-	@echo "  Phase 5+ targets remain intentionally unavailable"
+	@echo "  make demo-eino-recorded Replay two no-credential Coding Agent scenarios through Docker Tools"
+	@echo "  Phase 6+ targets remain intentionally unavailable"
 
 doctor:
 	@EXPECTED_GO_TOOLCHAIN="$(GO_TOOLCHAIN)" DOCTOR_ENV="$(DOCTOR_ENV)" COMPOSE_FILE="$(COMPOSE_FILE)" ./scripts/doctor.sh
@@ -62,8 +63,8 @@ migrate:
 demo-fake:
 	@AGENTDOCK_DATABASE_URL= go run ./cmd/agentdock demo-fake
 
-demo-eino-recorded:
-	@./scripts/not-implemented.sh "demo-eino-recorded" "phase 5"
+demo-eino-recorded: sandbox-image
+	@go run ./cmd/eino-recorded-demo
 
 sandbox-image:
 	@docker build --network none -t "$(SANDBOX_IMAGE)" -f "$(SANDBOX_DOCKERFILE)" .

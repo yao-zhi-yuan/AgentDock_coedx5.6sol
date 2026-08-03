@@ -290,11 +290,11 @@ func (controller *Controller) runReasoner(
 		}
 	}
 
-	result, err := controller.reasoner.Reason(ctx, reasoner.Request{
-		RunID:      state.Run.ID,
-		ScenarioID: state.Run.ScenarioID,
-		AttemptID:  state.AttemptID,
+	stream := controller.reasoner.Reason(ctx, reasoner.Request{
+		TaskSummary: state.Run.ScenarioID,
+		Budget:      reasoner.Budget{TokenLimit: 1},
 	})
+	result, err := reasoner.Collect(stream)
 	if err != nil {
 		return controller.appendControlledReasonerFailure(command, fmt.Errorf("reasoner error: %w", err), appendEvent)
 	}

@@ -1,0 +1,32 @@
+{
+  "version": "agentdock-reasoner-cassette/v1",
+  "system_contract_version": "agentdock-coding-v1",
+  "scenario_id": "normalize-name",
+  "recording_mode": "recorded",
+  "redacted": true,
+  "turns": [
+    [
+      {"type":"text_delta","text":"Inspect the failing implementation."},
+      {"type":"tool_call","tool_call":{"id":"normalize-read","name":"repo.read","arguments":"{\"path\":\"internal/user/name.go\"}"}},
+      {"type":"usage","usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}},
+      {"type":"finish","finish":{"reason":"tool_calls"}}
+    ],
+    [
+      {"type":"text_delta","text":"Apply the minimal deterministic fix."},
+      {"type":"tool_call","tool_call":{"id":"normalize-patch","name":"repo.apply_patch","arguments":"{\"path\":\"internal/user/name.go\",\"old\":\"return strings.ToLower(name)\",\"new\":\"return strings.ToLower(strings.TrimSpace(name))\"}"}},
+      {"type":"usage","usage":{"input_tokens":14,"output_tokens":8,"total_tokens":22}},
+      {"type":"finish","finish":{"reason":"tool_calls"}}
+    ],
+    [
+      {"type":"text_delta","text":"Run the repository tests through the declared Tool."},
+      {"type":"tool_call","tool_call":{"id":"normalize-test","name":"repo.test","arguments":"{\"packages\":[\"./internal/user/...\"]}"}},
+      {"type":"usage","usage":{"input_tokens":16,"output_tokens":6,"total_tokens":22}},
+      {"type":"finish","finish":{"reason":"tool_calls"}}
+    ],
+    [
+      {"type":"text_delta","text":"NormalizeName now trims whitespace and the recorded Tool test completed successfully."},
+      {"type":"usage","usage":{"input_tokens":12,"output_tokens":6,"total_tokens":18}},
+      {"type":"finish","finish":{"reason":"stop"}}
+    ]
+  ]
+}

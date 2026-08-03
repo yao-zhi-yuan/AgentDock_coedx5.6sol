@@ -80,7 +80,7 @@ func NewRegistry(contracts ...Contract) (*Registry, error) {
 		if _, exists := registry.contracts[contract.Name]; exists {
 			return nil, fmt.Errorf("%w: duplicate name %q", ErrInvalidContract, contract.Name)
 		}
-		registry.contracts[contract.Name] = contract
+		registry.contracts[contract.Name] = cloneContract(contract)
 	}
 	return registry, nil
 }
@@ -91,7 +91,7 @@ func NewBuiltinRegistry() (*Registry, error) {
 
 func (registry *Registry) Get(name string) (Contract, bool) {
 	contract, ok := registry.contracts[name]
-	return contract, ok
+	return cloneContract(contract), ok
 }
 
 func (registry *Registry) Names() []string {
@@ -101,6 +101,84 @@ func (registry *Registry) Names() []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// Contracts returns a sorted deep snapshot. Registry owns its backing bytes
+// and slices so a caller cannot widen a contract after Service construction.
+func (registry *Registry) Contracts() []Contract {
+	if registry == nil {
+		return nil
+	}
+	names := registry.Names()
+	contracts := make([]Contract, 0, len(names))
+	for _, name := range names {
+		contract, ok := registry.Get(name)
+		if ok {
+			contracts = append(contracts, contract)
+		}
+	}
+	return contracts
+}
+
+// ContractSetsEqual compares the complete execution contract independently of
+// input order. It includes both Schemas and every policy-relevant field.
+func ContractSetsEqual(left, right []Contract) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	rightByName := make(map[string]Contract, len(right))
+	for _, contract := range right {
+		if _, exists := rightByName[contract.Name]; exists {
+			return false
+		}
+		rightByName[contract.Name] = contract
+	}
+	seen := make(map[string]struct{}, len(left))
+	for _, contract := range left {
+		if _, duplicate := seen[contract.Name]; duplicate {
+			return false
+		}
+		seen[contract.Name] = struct{}{}
+		other, ok := rightByName[contract.Name]
+		if !ok || !contractsEqual(contract, other) {
+			return false
+		}
+	}
+	return true
+}
+
+func contractsEqual(left, right Contract) bool {
+	return left.Name == right.Name &&
+		left.Version == right.Version &&
+		bytes.Equal(left.InputSchema, right.InputSchema) &&
+		bytes.Equal(left.OutputSchema, right.OutputSchema) &&
+		left.Capability == right.Capability &&
+		left.ReadOnly == right.ReadOnly &&
+		left.Timeout == right.Timeout &&
+		left.OutputLimit == right.OutputLimit &&
+		stringSlicesEqual(left.AllowedPaths, right.AllowedPaths) &&
+		left.Network == right.Network &&
+		left.Idempotency == right.Idempotency
+}
+
+func stringSlicesEqual(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func cloneContract(contract Contract) Contract {
+	cloned := contract
+	cloned.InputSchema = append(json.RawMessage(nil), contract.InputSchema...)
+	cloned.OutputSchema = append(json.RawMessage(nil), contract.OutputSchema...)
+	cloned.AllowedPaths = append([]string(nil), contract.AllowedPaths...)
+	return cloned
 }
 
 func builtinContracts() []Contract {

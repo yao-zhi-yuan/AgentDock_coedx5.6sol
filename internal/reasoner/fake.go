@@ -5,60 +5,82 @@ import (
 	"sync"
 )
 
-// FakeReasoner returns one deterministic scripted result and records calls in a
-// race-safe counter.
+// FakeReasoner returns deterministic normalized streams and never reads model
+// credentials or provider configuration.
 type FakeReasoner struct {
-	mu     sync.Mutex
-	result Result
-	err    error
-	calls  int
+	mu          sync.Mutex
+	events      []Event
+	sourceErr   error
+	calls       int
+	defaultMode bool
 }
 
-// NewFakeReasoner creates the successful Gate-1 fake.
 func NewFakeReasoner() *FakeReasoner {
-	return NewFakeReasonerWithResult(Result{
-		Output: "deterministic fake patch",
-		ToolCall: &ToolCall{
-			Name:      Phase1PatchTool,
-			Arguments: `{"patch":"fake"}`,
-		},
-	})
+	return &FakeReasoner{defaultMode: true, events: cloneEvents([]Event{
+		Event{Type: EventTextDelta, Text: "deterministic fake patch"},
+		Event{Type: EventToolCall, ToolCall: &ToolCall{
+			ID: "phase1-fake-call", Name: Phase1PatchTool, Arguments: `{"patch":"fake"}`,
+		}},
+		Event{Type: EventUsage, Usage: &Usage{InputTokens: 0, OutputTokens: 1, TotalTokens: 1}},
+		Event{Type: EventFinish, Finish: &Finish{Reason: "tool_calls"}},
+	})}
 }
 
-// NewFakeReasonerWithResult scripts a result, including negative-test values.
+func NewFakeReasonerWithEvents(events ...Event) *FakeReasoner {
+	return &FakeReasoner{events: cloneEvents(events)}
+}
+
+// NewFakeReasonerWithResult preserves the phase-1 deterministic test seam.
 func NewFakeReasonerWithResult(result Result) *FakeReasoner {
-	return &FakeReasoner{result: cloneResult(result)}
-}
-
-// NewFailingFakeReasoner scripts a framework-neutral reasoning error.
-func NewFailingFakeReasoner(err error) *FakeReasoner {
-	return &FakeReasoner{err: err}
-}
-
-// Reason implements Reasoner.
-func (fake *FakeReasoner) Reason(ctx context.Context, _ Request) (Result, error) {
-	if err := ctx.Err(); err != nil {
-		return Result{}, err
+	events := []Event{}
+	if result.Output != "" {
+		events = append(events, Event{Type: EventTextDelta, Text: result.Output})
 	}
-
-	fake.mu.Lock()
-	defer fake.mu.Unlock()
-	fake.calls++
-	return cloneResult(fake.result), fake.err
+	if result.ToolCall != nil {
+		call := *result.ToolCall
+		if call.ID == "" {
+			call.ID = "scripted-fake-call"
+		}
+		events = append(events, Event{Type: EventToolCall, ToolCall: &call})
+	}
+	if result.Usage != (Usage{}) {
+		events = append(events, Event{Type: EventUsage, Usage: &result.Usage})
+	}
+	reason := result.FinishReason
+	if reason == "" {
+		reason = "tool_calls"
+	}
+	events = append(events, Event{Type: EventFinish, Finish: &Finish{Reason: reason}})
+	return NewFakeReasonerWithEvents(events...)
 }
 
-// CallCount returns the number of calls made.
+func NewFailingFakeReasoner(err error) *FakeReasoner {
+	return &FakeReasoner{sourceErr: err}
+}
+
+func (fake *FakeReasoner) Reason(ctx context.Context, request Request) Stream {
+	fake.mu.Lock()
+	fake.calls++
+	events := cloneEvents(fake.events)
+	sourceErr := fake.sourceErr
+	defaultMode := fake.defaultMode
+	fake.mu.Unlock()
+	if defaultMode && len(request.Tools) > 0 {
+		events = []Event{
+			{Type: EventTextDelta, Text: "deterministic fake repository inspection"},
+			{Type: EventToolCall, ToolCall: &ToolCall{ID: "phase5-fake-call", Name: "repo.read", Arguments: `{"path":"."}`}},
+			{Type: EventUsage, Usage: &Usage{InputTokens: 0, OutputTokens: 1, TotalTokens: 1}},
+			{Type: EventFinish, Finish: &Finish{Reason: "tool_calls"}},
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		sourceErr = err
+	}
+	return NewNormalizedStream(request, &sliceStream{events: events, err: sourceErr})
+}
+
 func (fake *FakeReasoner) CallCount() int {
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
 	return fake.calls
-}
-
-func cloneResult(result Result) Result {
-	cloned := result
-	if result.ToolCall != nil {
-		toolCall := *result.ToolCall
-		cloned.ToolCall = &toolCall
-	}
-	return cloned
 }

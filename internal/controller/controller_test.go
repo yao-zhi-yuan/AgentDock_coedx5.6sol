@@ -510,7 +510,7 @@ func newBlockingReasoner(result reasoner.Result) *blockingReasoner {
 	}
 }
 
-func (blocking *blockingReasoner) Reason(ctx context.Context, _ reasoner.Request) (reasoner.Result, error) {
+func (blocking *blockingReasoner) Reason(ctx context.Context, request reasoner.Request) reasoner.Stream {
 	blocking.mu.Lock()
 	blocking.calls++
 	blocking.mu.Unlock()
@@ -518,9 +518,9 @@ func (blocking *blockingReasoner) Reason(ctx context.Context, _ reasoner.Request
 
 	select {
 	case <-blocking.release:
-		return blocking.result, nil
+		return reasoner.NewFakeReasonerWithResult(blocking.result).Reason(ctx, request)
 	case <-ctx.Done():
-		return reasoner.Result{}, ctx.Err()
+		return reasoner.NewErrorStream(request, reasoner.ClassifyProviderError(ctx.Err()))
 	}
 }
 

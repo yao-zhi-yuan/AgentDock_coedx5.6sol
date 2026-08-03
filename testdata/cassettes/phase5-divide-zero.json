@@ -1,0 +1,32 @@
+{
+  "version": "agentdock-reasoner-cassette/v1",
+  "system_contract_version": "agentdock-coding-v1",
+  "scenario_id": "divide-zero",
+  "recording_mode": "recorded",
+  "redacted": true,
+  "turns": [
+    [
+      {"type":"text_delta","text":"Inspect the fixed divide scenario."},
+      {"type":"tool_call","tool_call":{"id":"divide-read","name":"repo.read","arguments":"{\"path\":\"internal/mathutil/divide.go\"}"}},
+      {"type":"usage","usage":{"input_tokens":9,"output_tokens":5,"total_tokens":14}},
+      {"type":"finish","finish":{"reason":"tool_calls"}}
+    ],
+    [
+      {"type":"text_delta","text":"Replace the complete function with guarded behavior."},
+      {"type":"tool_call","tool_call":{"id":"divide-patch","name":"repo.apply_patch","arguments":"{\"path\":\"internal/mathutil/divide.go\",\"old\":\"func Divide(total, count int) int {\\n\\treturn total / count\\n}\",\"new\":\"func Divide(total, count int) int {\\n\\tif count <= 0 {\\n\\t\\treturn 0\\n\\t}\\n\\tquotient := total / count\\n\\treturn quotient\\n}\"}"}},
+      {"type":"usage","usage":{"input_tokens":15,"output_tokens":10,"total_tokens":25}},
+      {"type":"finish","finish":{"reason":"tool_calls"}}
+    ],
+    [
+      {"type":"text_delta","text":"Run all tests in the disposable repository."},
+      {"type":"tool_call","tool_call":{"id":"divide-test","name":"repo.test","arguments":"{\"packages\":[\"./internal/mathutil/...\"]}"}},
+      {"type":"usage","usage":{"input_tokens":13,"output_tokens":5,"total_tokens":18}},
+      {"type":"finish","finish":{"reason":"tool_calls"}}
+    ],
+    [
+      {"type":"text_delta","text":"Divide now handles non-positive counts and the recorded Tool test completed successfully."},
+      {"type":"usage","usage":{"input_tokens":11,"output_tokens":6,"total_tokens":17}},
+      {"type":"finish","finish":{"reason":"stop"}}
+    ]
+  ]
+}

@@ -11,7 +11,9 @@ import (
 func TestFakeReasonerReturnsFrameworkNeutralResult(t *testing.T) {
 	fake := reasoner.NewFakeReasoner()
 
-	result, err := fake.Reason(context.Background(), reasoner.Request{RunID: "run-001", AttemptID: "attempt-001"})
+	result, err := reasoner.Collect(fake.Reason(context.Background(), reasoner.Request{
+		Budget: reasoner.Budget{TokenLimit: 1},
+	}))
 	if err != nil {
 		t.Fatalf("Reason() error = %v", err)
 	}
@@ -28,15 +30,14 @@ func TestFakeReasonerReturnsFrameworkNeutralResult(t *testing.T) {
 
 func TestFakeReasonerCanScriptIllegalToolCall(t *testing.T) {
 	fake := reasoner.NewFakeReasonerWithResult(reasoner.Result{
-		ToolCall: &reasoner.ToolCall{Name: "host.shell", Arguments: `{}`},
+		ToolCall: &reasoner.ToolCall{ID: "bad-call", Name: "host.shell", Arguments: `{}`},
 	})
 
-	result, err := fake.Reason(context.Background(), reasoner.Request{RunID: "run-001"})
-	if err != nil {
-		t.Fatalf("Reason() error = %v", err)
-	}
-	err = reasoner.ValidatePhase1Result(result)
-	if !errors.Is(err, reasoner.ErrIllegalToolCall) {
-		t.Fatalf("ValidatePhase1Result() error = %v, want illegal tool call", err)
+	_, err := reasoner.Collect(fake.Reason(context.Background(), reasoner.Request{
+		Budget: reasoner.Budget{TokenLimit: 1},
+	}))
+	var streamErr *reasoner.StreamError
+	if !errors.As(err, &streamErr) || streamErr.Class != reasoner.ErrorInvalidTool {
+		t.Fatalf("Collect() error = %v, want invalid Tool", err)
 	}
 }

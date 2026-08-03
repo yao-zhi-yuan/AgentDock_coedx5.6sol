@@ -1,0 +1,30 @@
+apiVersion: agentdock.dev/v1alpha1
+kind: HarnessRun
+metadata:
+  name: phase5-divide-zero
+
+target:
+  adapter: eino
+  repository: examples/buggy-go-service
+  revision: HEAD
+
+task:
+  prompt: |
+    Fix Divide so a non-positive count returns zero instead of panicking or dividing.
+  allowedPaths:
+    - internal/mathutil/
+
+runtime:
+  maxRepairRounds: 0
+  timeout: 2m
+  tokenBudget: 200
+
+sandbox:
+  network: none
+  cpu: 1
+  memory: 512Mi
+  pids: 128
+  commandTimeout: 60s
+
+verification: []
+faults: []
