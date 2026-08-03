@@ -135,8 +135,14 @@ idempotency and durable Receipt/Artifact evidence.
   success, fixes permissions with an owned cleanup container, disables further
   Execute calls as soon as cleanup starts, and removes the temporary worktree
   without global `git worktree prune`. A failed worktree removal restores the
-  sanitized `.git` pointer before returning. Acceptance compares the source
-  repository digest and Git status before and after.
+  sanitized `.git` pointer before returning. Pending ownership is recorded
+  before worktree/container side effects; failed provisioning rollback returns
+  a cleanup handle and remains visible to Provider `Cleanup`. An
+  outcome-unknown Docker create stays tracked through bounded re-inspection,
+  and Destroy scans by full owner token but re-validates exact phase/Run/Attempt
+  labels before any fallback removal. Docker Provider cleanup retains the
+  worktree while any owned container outcome remains unresolved. Acceptance
+  compares the source repository digest and Git status before and after.
 
 Residual risks remain: Docker Desktop/daemon and the shared kernel are trusted;
 disk exhaustion is not completely bounded; repositories without vendored or

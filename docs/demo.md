@@ -61,11 +61,12 @@ make migrate
 make demo-phase3
 ```
 
-The demonstration starts Workers A and B together. A acquires the Lease while
-B stays registered, heartbeats independently, and waits. It kills A, waits for
-TTL expiry, observes B take over with a larger token, then starts the Worker
-binary again as an explicit A/old-token probe. That process presents A's old
-token to a lease-sensitive append, prints `stale_probe_rejected`, and exits
+The demonstration starts Worker A and waits until A acquires the Lease. It then
+starts Worker B; B stays registered, heartbeats independently, and waits. It
+kills A, waits for TTL expiry, observes B take over with a larger token, then
+starts the Worker binary again as an explicit A/old-token probe. That process
+presents A's old token to a lease-sensitive append, prints
+`stale_probe_rejected`, and exits
 successfully only when PostgreSQL rejects it. Worker B then shows the Run
 converging to `Succeeded`.
 

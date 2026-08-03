@@ -46,7 +46,14 @@ per-Sandbox owner token plus phase/Run/Attempt labels, and lifecycle operations
 verify those labels and then address the immutable container ID. Name
 collisions or mismatched labels are rejected without deleting the foreign
 container. Removal errors remain tracked, are returned and audited, and can be
-retried by Destroy. Once Destroy starts, execution stays disabled; a failed
-worktree removal re-sanitizes `.git` before returning. The production
-caller-environment allowlist is empty and Go control variables are fixed.
-Output uses one combined stdout/stderr budget.
+retried by Destroy. Provider-owned pending worktree paths and Sandbox owner
+tokens are registered before their external side effects; failed rollback
+returns a cleanup handle and remains eligible for Provider `Cleanup`. Docker
+create uses an independent bounded context, retains an outcome-unknown name
+across initial not-found inspection, and Destroy scans the full owner token
+while re-validating all scope labels. Docker Provider cleanup never drains the
+underlying worktree Provider independently; the owning Sandbox removes its
+worktree only after container convergence. Once Destroy starts, execution stays
+disabled; a failed worktree removal re-sanitizes `.git` before returning. The
+production caller-environment allowlist is empty and Go control variables are
+fixed. Output uses one combined stdout/stderr budget.

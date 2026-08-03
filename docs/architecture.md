@@ -161,7 +161,14 @@ fixed non-host path and over-mounted read-only. This protects the pointer while
 the private worktree root remains non-sticky so UID 65532 can atomically
 replace top-level files. The pointer is restored only for bounded Destroy. The
 configured image tag is resolved to an immutable local SHA-256 image ID before
-execution.
+execution. The worktree Provider records the canonical temporary path before
+directory removal or `git worktree add`; the Docker Provider records its full
+random owner token and cleanup handle before container side effects. If
+provisioning rollback fails, `Create` returns both the error and a non-nil
+Sandbox cleanup handle. The Git Provider can retry retained standalone
+worktree handles; the Docker Provider retries each retained Sandbox, which
+keeps its worktree until the owned container set has converged. This also works
+if the immediate caller lost the returned handle.
 
 Every container uses:
 
@@ -184,7 +191,12 @@ Destroy resolve an immutable container ID and require all ownership labels to
 match before acting. A name collision or forged/mismatched label is rejected
 and never cleaned as if it belonged to the current Sandbox.
 An unresolved name after a transient inspect failure remains tracked for a
-later Destroy retry. Command completion is not audited as successful until
+bounded re-inspection and later Destroy retry. Docker create uses an independent
+bounded context because caller cancellation does not prove the daemon-side
+result. Destroy also scans by the full owner token, then re-validates phase,
+Run, Attempt, and immutable container ID before removal; this recovers an owned
+late-visible container without touching a forged-scope or other-Provider
+container. Command completion is not audited as successful until
 owned-container removal succeeds, and cleanup failure is explicitly audited
 on success, non-zero exit, timeout, and cancellation paths. Destroy is a
 one-way state transition: Execute is denied once cleanup starts. If worktree

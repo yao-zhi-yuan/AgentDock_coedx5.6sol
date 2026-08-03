@@ -26,6 +26,11 @@ const TestImage = "agentdock-sandbox:phase4"
 
 const sanitizedGitPointer = "gitdir: /agentdock/not-mounted\n"
 
+const (
+	containerCreateSettleWindow = 5 * time.Second
+	containerReinspectAttempts  = 5
+)
+
 type DockerConfig struct {
 	Image          string
 	WorktreeRoot   string
@@ -39,9 +44,12 @@ type DockerConfig struct {
 }
 
 type DockerProvider struct {
-	config  DockerConfig
-	counter atomic.Uint64
-	owners  sync.Map // owner token -> Scope
+	config    DockerConfig
+	mu        sync.Mutex
+	counter   atomic.Uint64
+	owners    sync.Map // owner token -> Scope, stored before external side effects
+	pending   sync.Map // owner token -> *dockerSandbox until Destroy audit succeeds
+	worktrees *GitWorktreeProvider
 }
 
 func NewDockerProvider(config DockerConfig) *DockerProvider {
@@ -63,10 +71,15 @@ func NewDockerProvider(config DockerConfig) *DockerProvider {
 	if config.OutputLimit == 0 {
 		config.OutputLimit = 1 << 20
 	}
-	return &DockerProvider{config: config}
+	return &DockerProvider{
+		config:    config,
+		worktrees: NewGitWorktreeProvider(config.WorktreeRoot),
+	}
 }
 
 func (provider *DockerProvider) Create(ctx context.Context, spec Spec) (Sandbox, error) {
+	provider.mu.Lock()
+	defer provider.mu.Unlock()
 	if provider.config.Audit == nil {
 		return nil, errors.New("phase-4 audit recorder is required")
 	}
@@ -81,53 +94,87 @@ func (provider *DockerProvider) Create(ctx context.Context, spec Spec) (Sandbox,
 	if err != nil {
 		return nil, provider.recordCreateFailed(spec, "owner token generation", immutableImage, err)
 	}
-	worktree, err := NewGitWorktreeProvider(provider.config.WorktreeRoot).Create(ctx, spec)
+	provider.owners.Store(ownerToken, Scope{RunID: spec.RunID, AttemptID: spec.AttemptID})
+	config := provider.config
+	config.Image = immutableImage
+	worktree, err := provider.worktrees.Create(ctx, spec)
 	if err != nil {
-		return nil, provider.recordCreateFailed(spec, "disposable worktree creation", immutableImage, err)
-	}
-	if err := prepareWorkspacePermissions(worktree.Workspace()); err != nil {
-		cleanupErr := worktree.Destroy(context.Background())
-		if cleanupErr != nil {
-			cleanupErr = fmt.Errorf("clean worktree after permission setup failure: %w", cleanupErr)
+		if worktree == nil {
+			provider.owners.Delete(ownerToken)
+			return nil, provider.recordCreateFailed(spec, "disposable worktree creation", immutableImage, err)
 		}
-		return nil, provider.recordCreateFailed(
-			spec,
-			"workspace permission setup",
-			immutableImage,
-			errors.Join(err, cleanupErr),
-		)
+		instance := provider.newPendingSandbox(config, spec, worktree, ownerToken)
+		return instance, provider.recordCreateFailed(spec, "disposable worktree creation", immutableImage, err)
+	}
+	instance := provider.newPendingSandbox(config, spec, worktree, ownerToken)
+	if err := prepareWorkspacePermissions(worktree.Workspace()); err != nil {
+		return provider.failProvisioning(instance, "workspace permission setup", err)
 	}
 	gitPointer, err := hideWorktreeGitPointer(worktree.Workspace())
 	if err != nil {
-		cleanupErr := worktree.Destroy(context.Background())
-		if cleanupErr != nil {
-			cleanupErr = fmt.Errorf("clean worktree after Git pointer setup failure: %w", cleanupErr)
-		}
-		return nil, provider.recordCreateFailed(
-			spec,
-			"Git pointer sanitization",
-			immutableImage,
-			errors.Join(err, cleanupErr),
-		)
+		return provider.failProvisioning(instance, "Git pointer sanitization", err)
 	}
-	config := provider.config
-	config.Image = immutableImage
-	instance := &dockerSandbox{
-		provider:   provider,
-		config:     config,
-		spec:       spec,
-		worktree:   worktree,
-		gitPointer: gitPointer,
-		ownerToken: ownerToken,
-		containers: make(map[string]string),
-	}
+	instance.gitPointer = gitPointer
+	instance.gitPointerSanitized = true
 	if err := instance.recordCreate(); err != nil {
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		return nil, errors.Join(err, rollbackWorktreeAfterCreateFailure(cleanupCtx, worktree, gitPointer))
+		return provider.failProvisioning(instance, "sandbox_created audit", err)
 	}
-	provider.owners.Store(ownerToken, instance.Scope())
+	instance.provisioningFailed = false
 	return instance, nil
+}
+
+func (provider *DockerProvider) newPendingSandbox(
+	config DockerConfig,
+	spec Spec,
+	worktree Sandbox,
+	ownerToken string,
+) *dockerSandbox {
+	instance := &dockerSandbox{
+		provider:            provider,
+		config:              config,
+		spec:                spec,
+		worktree:            worktree,
+		ownerToken:          ownerToken,
+		containers:          make(map[string]string),
+		uncertainContainers: make(map[string]time.Time),
+		provisioningFailed:  true,
+	}
+	provider.pending.Store(ownerToken, instance)
+	return instance
+}
+
+func (provider *DockerProvider) failProvisioning(
+	instance *dockerSandbox,
+	stage string,
+	cause error,
+) (Sandbox, error) {
+	cleanupErr := instance.Destroy(context.Background())
+	reported := provider.recordCreateFailed(
+		instance.spec,
+		stage,
+		instance.config.Image,
+		errors.Join(cause, cleanupErr),
+	)
+	if cleanupErr == nil {
+		return nil, reported
+	}
+	return instance, reported
+}
+
+// Cleanup retries every Sandbox still owned by this Provider. DockerProvider
+// wraps every non-nil worktree Create result in a pending dockerSandbox before
+// returning it. Worktrees must therefore be cleaned only by their owning
+// Sandbox, after its container set converges; independently draining the
+// worktree Provider could remove a workspace beneath a late-visible container.
+func (provider *DockerProvider) Cleanup(ctx context.Context) error {
+	provider.mu.Lock()
+	defer provider.mu.Unlock()
+	var cleanupErr error
+	provider.pending.Range(func(_, value any) bool {
+		cleanupErr = errors.Join(cleanupErr, value.(*dockerSandbox).Destroy(ctx))
+		return true
+	})
+	return cleanupErr
 }
 
 func validateDockerConfig(config DockerConfig) error {
@@ -276,6 +323,7 @@ func (provider *DockerProvider) ActiveContainers(ctx context.Context) []string {
 		"docker",
 		"ps",
 		"-a",
+		"--no-trunc",
 		"--filter",
 		"label=agentdock.phase=4",
 		"--format",
@@ -305,23 +353,30 @@ func (provider *DockerProvider) ActiveContainers(ctx context.Context) []string {
 }
 
 type dockerSandbox struct {
-	mu             sync.Mutex
-	provider       *DockerProvider
-	config         DockerConfig
-	spec           Spec
-	worktree       Sandbox
-	gitPointer     []byte
-	ownerToken     string
-	containers     map[string]string
-	destroying     bool
-	destroyed      bool
-	destroyAudited bool
+	mu                  sync.Mutex
+	provider            *DockerProvider
+	config              DockerConfig
+	spec                Spec
+	worktree            Sandbox
+	gitPointer          []byte
+	gitPointerSanitized bool
+	ownerToken          string
+	containers          map[string]string
+	uncertainContainers map[string]time.Time
+	provisioningFailed  bool
+	destroying          bool
+	destroyed           bool
+	destroyAudited      bool
 
 	// removeOwnedContainerOverride is an internal failure-injection seam. It is
 	// nil in production and lets integration tests prove cleanup errors are
 	// returned, audited, and retained for a later Destroy retry.
 	removeOwnedContainerOverride func(string) (bool, error)
 	cleanupWorkspaceOverride     func(context.Context) error
+	createContainerOverride      func(context.Context, string, Request) (string, error)
+	inspectContainerOverride     func(string) (string, bool, bool, error)
+	scanOwnedContainersOverride  func() error
+	containerReinspectDelay      time.Duration
 }
 
 func (sandbox *dockerSandbox) Workspace() string {
@@ -335,7 +390,7 @@ func (sandbox *dockerSandbox) Scope() Scope {
 func (sandbox *dockerSandbox) Execute(ctx context.Context, request Request) (Result, error) {
 	sandbox.mu.Lock()
 	defer sandbox.mu.Unlock()
-	if sandbox.destroyed || sandbox.destroying {
+	if sandbox.destroyed || sandbox.destroying || sandbox.provisioningFailed {
 		return Result{}, sandbox.recordDenied(request, ErrDestroyed)
 	}
 	if err := validateContainerCommand(request.Command); err != nil {
@@ -359,6 +414,7 @@ func (sandbox *dockerSandbox) Execute(ctx context.Context, request Request) (Res
 	sandbox.containers[name] = ""
 	containerID, err := sandbox.createContainer(ctx, name, request)
 	if err != nil {
+		sandbox.markContainerCreateUnknown(name)
 		cleanupErr := sandbox.cleanupFailedCreate(name)
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return sandbox.interruptedBeforeStart(
@@ -379,6 +435,7 @@ func (sandbox *dockerSandbox) Execute(ctx context.Context, request Request) (Res
 		return Result{}, errors.Join(err, cleanupErr, auditErr)
 	}
 	sandbox.containers[name] = containerID
+	delete(sandbox.uncertainContainers, name)
 
 	runContext, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -628,12 +685,18 @@ func (sandbox *dockerSandbox) containerName(purpose string, sequence uint64) str
 }
 
 func (sandbox *dockerSandbox) createContainer(
-	ctx context.Context,
+	_ context.Context,
 	name string,
 	request Request,
 ) (string, error) {
-	createContext, cancel := context.WithTimeout(ctx, 15*time.Second)
+	// Docker create is a remote side effect. Do not bind it to the caller's
+	// cancellation: wait on an independent bounded context, then classify a
+	// local timeout as outcome-unknown and retain the pre-registered name.
+	createContext, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
+	if sandbox.createContainerOverride != nil {
+		return sandbox.createContainerOverride(createContext, name, request)
+	}
 	arguments := []string{
 		"create",
 		"--interactive",
@@ -705,6 +768,13 @@ func (sandbox *dockerSandbox) createContainer(
 	return containerID, nil
 }
 
+func (sandbox *dockerSandbox) markContainerCreateUnknown(name string) {
+	if sandbox.uncertainContainers == nil {
+		sandbox.uncertainContainers = make(map[string]time.Time)
+	}
+	sandbox.uncertainContainers[name] = time.Now().Add(containerCreateSettleWindow)
+}
+
 func prepareWorkspacePermissions(workspace string) error {
 	err := filepath.WalkDir(workspace, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -765,7 +835,10 @@ func (sandbox *dockerSandbox) recordTruncation(request Request, outputBytes, out
 	})
 }
 
-var ErrContainerOwnership = errors.New("container ownership labels do not match sandbox scope")
+var (
+	ErrContainerOwnership      = errors.New("container ownership labels do not match sandbox scope")
+	ErrContainerOutcomeUnknown = errors.New("container create outcome is not yet settled")
+)
 
 type containerInspection struct {
 	ID     string            `json:"id"`
@@ -773,6 +846,9 @@ type containerInspection struct {
 }
 
 func (sandbox *dockerSandbox) inspectContainer(reference string) (string, bool, bool, error) {
+	if sandbox.inspectContainerOverride != nil {
+		return sandbox.inspectContainerOverride(reference)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	return sandbox.inspectContainerContext(ctx, reference)
@@ -879,15 +955,22 @@ func (sandbox *dockerSandbox) removeTrackedContainer(name string) error {
 			return err
 		}
 		if !exists {
+			if settleUntil, uncertain := sandbox.uncertainContainers[name]; uncertain &&
+				time.Now().Before(settleUntil) {
+				return ErrContainerOutcomeUnknown
+			}
 			delete(sandbox.containers, name)
+			delete(sandbox.uncertainContainers, name)
 			return nil
 		}
 		if !owned {
 			delete(sandbox.containers, name)
+			delete(sandbox.uncertainContainers, name)
 			return ErrContainerOwnership
 		}
 		containerID = ownedID
 		sandbox.containers[name] = containerID
+		delete(sandbox.uncertainContainers, name)
 	}
 	remove := sandbox.removeOwnedContainer
 	if sandbox.removeOwnedContainerOverride != nil {
@@ -899,6 +982,7 @@ func (sandbox *dockerSandbox) removeTrackedContainer(name string) error {
 	}
 	if removed {
 		delete(sandbox.containers, name)
+		delete(sandbox.uncertainContainers, name)
 	}
 	return nil
 }
@@ -939,21 +1023,95 @@ func (sandbox *dockerSandbox) removeOwnedContainer(reference string) (bool, erro
 	return true, nil
 }
 
-func (sandbox *dockerSandbox) cleanupFailedCreate(name string) error {
-	containerID, exists, owned, err := sandbox.inspectContainer(name)
+func (sandbox *dockerSandbox) removeProviderOwnedContainers() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	command := exec.CommandContext(
+		ctx,
+		"docker",
+		"ps",
+		"-a",
+		"--no-trunc",
+		"--filter",
+		"label=agentdock.owner_token="+sandbox.ownerToken,
+		"--format",
+		"{{.ID}}\t{{.Names}}",
+	)
+	output, truncated, err := boundedCommandOutput(command, 1<<20)
 	if err != nil {
-		return err
+		return fmt.Errorf("scan provider-owned containers: %w: %s%s", err, strings.TrimSpace(string(output)), truncatedSuffix(truncated))
 	}
-	if !exists {
-		delete(sandbox.containers, name)
-		return nil
+	if truncated {
+		return errors.New("scan provider-owned containers exceeded 1 MiB")
 	}
-	if !owned {
-		delete(sandbox.containers, name)
-		return ErrContainerOwnership
+	var cleanupErr error
+	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+		if line == "" {
+			continue
+		}
+		containerID, name, ok := strings.Cut(line, "\t")
+		if !ok || !isObjectID(containerID) || name == "" {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("invalid provider-owned container row %q", line))
+			continue
+		}
+		ownedID, exists, owned, inspectErr := sandbox.inspectContainer(containerID)
+		if inspectErr != nil {
+			cleanupErr = errors.Join(cleanupErr, inspectErr)
+			continue
+		}
+		if !exists || !owned || ownedID != containerID {
+			// A forged token with a mismatched phase/Run/Attempt is foreign and
+			// must never be removed by a token-only provider scan.
+			continue
+		}
+		removed, removeErr := sandbox.removeOwnedContainer(containerID)
+		if removeErr != nil {
+			cleanupErr = errors.Join(cleanupErr, removeErr)
+			continue
+		}
+		if !removed {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("owned container %s was not removed", containerID))
+			continue
+		}
+		for trackedName, trackedID := range sandbox.containers {
+			if trackedName == name || trackedID == containerID {
+				delete(sandbox.containers, trackedName)
+				delete(sandbox.uncertainContainers, trackedName)
+			}
+		}
 	}
-	sandbox.containers[name] = containerID
-	return sandbox.removeTrackedContainer(name)
+	return cleanupErr
+}
+
+func (sandbox *dockerSandbox) cleanupFailedCreate(name string) error {
+	for attempt := 0; attempt < containerReinspectAttempts; attempt++ {
+		containerID, exists, owned, err := sandbox.inspectContainer(name)
+		if err != nil {
+			return err
+		}
+		if exists {
+			if !owned {
+				delete(sandbox.containers, name)
+				delete(sandbox.uncertainContainers, name)
+				return ErrContainerOwnership
+			}
+			sandbox.containers[name] = containerID
+			delete(sandbox.uncertainContainers, name)
+			return sandbox.removeTrackedContainer(name)
+		}
+		if attempt+1 < containerReinspectAttempts {
+			delay := sandbox.containerReinspectDelay
+			if delay == 0 {
+				delay = 100 * time.Millisecond
+			}
+			if delay > 0 {
+				time.Sleep(delay)
+			}
+		}
+	}
+	// One not-found (or even a short series) is not proof that a canceled
+	// Docker client did not leave a late-visible daemon-side container.
+	return ErrContainerOutcomeUnknown
 }
 
 func (sandbox *dockerSandbox) Destroy(_ context.Context) (resultErr error) {
@@ -966,29 +1124,55 @@ func (sandbox *dockerSandbox) Destroy(_ context.Context) (resultErr error) {
 	}()
 	if sandbox.destroyed {
 		if sandbox.destroyAudited {
+			sandbox.forgetProviderOwnership()
 			return nil
 		}
-		return sandbox.recordDestroy()
+		auditErr := sandbox.recordDestroy()
+		if auditErr == nil {
+			sandbox.forgetProviderOwnership()
+		}
+		return auditErr
 	}
 	// Destruction is one-way. Once it starts, no further command may observe a
 	// partially cleaned workspace or a temporarily restored real .git pointer.
 	sandbox.destroying = true
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	var containerErr error
 	for name := range sandbox.containers {
-		_ = sandbox.killTrackedContainer(name)
-		if err := sandbox.removeTrackedContainer(name); err != nil {
-			return err
+		containerErr = errors.Join(containerErr, sandbox.killTrackedContainer(name))
+		if err := sandbox.removeTrackedContainer(name); err != nil &&
+			!errors.Is(err, ErrContainerOutcomeUnknown) {
+			containerErr = errors.Join(containerErr, err)
 		}
+	}
+	scanOwned := sandbox.removeProviderOwnedContainers
+	if sandbox.scanOwnedContainersOverride != nil {
+		scanOwned = sandbox.scanOwnedContainersOverride
+	}
+	containerErr = errors.Join(containerErr, scanOwned())
+	for name := range sandbox.containers {
+		containerErr = errors.Join(containerErr, sandbox.removeTrackedContainer(name))
+	}
+	if containerErr != nil || len(sandbox.containers) != 0 {
+		if containerErr == nil {
+			containerErr = ErrContainerOutcomeUnknown
+		}
+		return containerErr
 	}
 	cleanupWorkspace := sandbox.cleanupWorkspace
 	if sandbox.cleanupWorkspaceOverride != nil {
 		cleanupWorkspace = sandbox.cleanupWorkspaceOverride
 	}
-	if err := cleanupWorkspace(cleanupCtx); err != nil {
-		return err
+	if !sandbox.provisioningFailed {
+		if err := cleanupWorkspace(cleanupCtx); err != nil {
+			return err
+		}
 	}
-	restoreErr := restoreWorktreeGitPointer(sandbox.worktree.Workspace(), sandbox.gitPointer)
+	var restoreErr error
+	if sandbox.gitPointerSanitized {
+		restoreErr = restoreWorktreeGitPointer(sandbox.worktree.Workspace(), sandbox.gitPointer)
+	}
 	destroyErr := sandbox.worktree.Destroy(cleanupCtx)
 	if destroyErr == nil {
 		// The disposable worktree is the resource boundary. Once its provider
@@ -996,12 +1180,25 @@ func (sandbox *dockerSandbox) Destroy(_ context.Context) (resultErr error) {
 		// .git pointer reported a diagnostic error: there is no workspace left to
 		// clean on a retry.
 		sandbox.destroyed = true
-		sandbox.provider.owners.Delete(sandbox.ownerToken)
-		return errors.Join(restoreErr, sandbox.recordDestroy())
+		auditErr := sandbox.recordDestroy()
+		if auditErr == nil {
+			sandbox.forgetProviderOwnership()
+		}
+		return errors.Join(restoreErr, auditErr)
 	}
 	var sanitizeErr error
-	_, sanitizeErr = hideWorktreeGitPointer(sandbox.worktree.Workspace())
+	if sandbox.gitPointerSanitized {
+		_, sanitizeErr = hideWorktreeGitPointer(sandbox.worktree.Workspace())
+	}
 	return errors.Join(restoreErr, destroyErr, sanitizeErr)
+}
+
+func (sandbox *dockerSandbox) forgetProviderOwnership() {
+	if sandbox.provider == nil {
+		return
+	}
+	sandbox.provider.pending.Delete(sandbox.ownerToken)
+	sandbox.provider.owners.Delete(sandbox.ownerToken)
 }
 
 func (sandbox *dockerSandbox) recordDestroyFailed() error {
@@ -1043,10 +1240,12 @@ func (sandbox *dockerSandbox) cleanupWorkspace(ctx context.Context) error {
 	sandbox.containers[name] = ""
 	containerID, err := sandbox.createContainer(ctx, name, request)
 	if err != nil {
+		sandbox.markContainerCreateUnknown(name)
 		cleanupErr := sandbox.cleanupFailedCreate(name)
 		return errors.Join(fmt.Errorf("create workspace cleanup container: %w", err), cleanupErr)
 	}
 	sandbox.containers[name] = containerID
+	delete(sandbox.uncertainContainers, name)
 	runContext, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	var output limitedBuffer

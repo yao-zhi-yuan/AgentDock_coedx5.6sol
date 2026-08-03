@@ -7,8 +7,11 @@
   `8873984c85ed7244fc46b13ff0417df013a28385`
   (`fix: stabilize worker gates and receipt constraints`)
 - Construction contract: repository-root `AgentDock-Verify-施工计划.md`
-- Proposed subject after all gates:
-  `feat: add docker sandbox and policy enforcement`
+- Phase-4 implementation commit:
+  `9fbe37fbba9317cbba53bc17bdf85ff0e96639d3`
+  (`feat: add docker sandbox and policy enforcement`)
+- Planned external-review remediation: one follow-up commit on top of
+  `9fbe37fbba9317cbba53bc17bdf85ff0e96639d3`; no amend or reset.
 
 ## Scope
 
@@ -40,6 +43,90 @@ at-least-once execution
 ```
 
 No exactly-once or strong multi-tenant isolation claim is made.
+
+## External blank review and Gate reopening (2026-08-03)
+
+The external blank read-only review of implementation commit
+`9fbe37fbba9317cbba53bc17bdf85ff0e96639d3` returned **Ready No**, with
+Critical 0 / Important 1 / Minor 5. Gate 4 was immediately reopened and the
+earlier internal PASS below became historical evidence only; it is not reused
+for this remediation.
+
+The Important finding was that failed provisioning could lose its cleanup
+owner: a failed worktree rollback could return no retry handle, and an
+outcome-unknown Docker create could be forgotten after initial `not found`
+inspection even if the daemon made the container visible later. The fix now:
+
+- registers the canonical pending worktree path before directory/Git side
+  effects and returns a non-nil cleanup handle with the create error whenever
+  rollback fails;
+- registers the Docker owner token and pending Sandbox before container side
+  effects, uses an independent bounded create context, retains uncertain names
+  through bounded re-inspection, and keeps failed cleanup eligible for
+  `DockerProvider.Cleanup`;
+- makes Destroy scan by the full owner token and then re-validate exact phase,
+  Run, Attempt, and immutable container ID before removal, so a late owned
+  container converges without deleting cross-Provider or forged-scope
+  containers;
+- keeps failed worktree/Sandbox ownership until resource cleanup and destroy
+  audit both succeed.
+
+Deterministic new tests were first compiled before those fields and methods
+existed and exited 1. The red diagnostics named the missing pending registries,
+cleanup APIs, create/inspect seams, and outcome-unknown error. After the fix:
+
+| Remediation command | Exit | Key evidence |
+|---|---:|---|
+| local unit plus worktree focused tests | 0 | late-create state machine and materialize rollback retry passed; origin digest/status unchanged |
+| first sandboxed Docker focused attempt | 1 | Docker socket permission denied; not accepted as product evidence |
+| first host escalation request | not run | approval service rejected for account usage limit; no historical result reused |
+| explicitly re-authorized host Docker focused suite | 0 | `6.406s`; late-create, audit+Destroy failure, owner scan, cross-Provider and forged-label tests passed |
+| fresh `make sandbox-security-test` | 0 | pinned image rebuilt; complete suite passed in `22.247s` |
+| `git diff --check` | 0 | no whitespace errors after implementation and documentation edits |
+
+All five Minor findings were evaluated and fixed at low risk: demo error paths
+join Destroy/Provider cleanup errors; worktree-remove stdout+stderr is capped at
+64 KiB; README builds the image before direct Docker integration; this report
+now distinguishes the existing implementation commit from the follow-up; and
+the phase-3 demo prose now matches the actual A-acquires-before-B-starts order.
+
+The first frozen remediation reviews correctly returned Ready No, Critical 0 /
+Important 1. Both found that `os.MkdirTemp` still created the per-run directory
+before the pending record and two validation branches could ignore removal
+failure. The increment review additionally reported Minor 1 for missing direct
+coverage of the new 64 KiB worktree-remove output cap. Neither review is counted
+as a pass.
+
+The follow-up red test referenced a post-mkdir validation seam that did not yet
+exist and exited 1 at compile time. The implementation now generates a
+cryptographically random candidate path without filesystem mutation, stores
+the pending handle, then atomically creates and validates the private directory;
+post-create failures route through retryable Destroy/Provider Cleanup. The
+focused green command exited 0 in `1.992s`, proving validation failure plus
+failed cleanup retains a handle, then retry removes the directory with zero Git
+registration and unchanged origin digest/status. A helper-process regression
+also proves stdout+stderr storage is exactly bounded and reports truncation.
+After this repair, a second fresh `make sandbox-security-test` rebuilt the image
+and exited 0; the complete package passed in `20.665s`.
+
+The next increment re-review returned Ready No, Critical 0 / Important 1 /
+Minor 0 because `DockerProvider.Cleanup` still drained the lower worktree
+Provider even when the owning Sandbox had returned outcome-unknown for a
+container. A deterministic red test exited 1 and observed one premature
+worktree cleanup call. Docker Provider cleanup now retries only its pending
+Sandboxes; each Sandbox keeps sole ordering responsibility and removes its
+worktree only after the owned container set converges. The identical focused
+test then exited 0 twice (focused and package unit), proving first cleanup
+retains the worktree, a late-visible container is removed on retry, and the
+second cleanup clears container/worktree/pending/owner state. A third fresh
+`make sandbox-security-test` rebuilt the image and exited 0 with package time
+`19.501s`. This No verdict is retained as remediation evidence, not counted as
+a pass.
+
+Gate remains **PENDING** until the frozen remediation increment and complete
+BASE→index reviews reach Critical 0 / Important 0, every required verification
+is rerun fresh, this report records those results, and the follow-up commit is
+created with a clean worktree.
 
 ## Preflight and Gate-3 baseline
 
@@ -366,12 +453,11 @@ values or command output. `Artifact()` returns its SHA-256 digest, size, path,
 and type `phase-4-audit-jsonl`. This operational artifact cannot emit or stand
 in for a phase-6 Verifier result.
 
-## Final frozen-candidate verification (2026-08-03)
+## Superseded pre-external-review verification (2026-08-03)
 
-All accepted results below were run after the final production-code freeze and
-after both implementation reviews reached Critical 0 / Important 0. Only this
-status/evidence document was updated afterward; the resulting documentation-
-only index was separately reviewed and passed `diff --check`. Commands use
+These results were run for the original implementation candidate before the
+external blank review found the Important issue. They remain an audit trail but
+do not establish the remediated candidate's Gate. Commands used
 `GOCACHE=/private/tmp/agentdock-go-cache-phase4-final-gate`; PostgreSQL commands
 also use the repository-local database URL. An incomplete-output Chaos call and
 an incomplete-output first Phase-4 demo call were not accepted; the identical
@@ -446,6 +532,90 @@ no construction-plan diff, and both cached and working-tree `diff --check`
 clean. The branch and pre-commit HEAD remained exactly
 `codex/agentdock-verify` and `8873984c85ed7244fc46b13ff0417df013a28385`.
 
+## External-review remediation final verification (2026-08-03)
+
+Every result in this section was produced after the final remediation
+production-code freeze and the third increment/full-range reviews reached
+Critical 0 / Important 0. Commands used
+`GOCACHE=/private/tmp/agentdock-go-cache-phase4-external-final`. PostgreSQL
+commands used the repository-local database URL with explicitly authorized
+host access; Docker commands used the same final index and freshly built image.
+
+### Exact Phase-4 Gate and demonstration
+
+| Command | Exit | Key evidence |
+|---|---:|---|
+| `go test ./internal/policy/... ./internal/tools/...` | 0 | Policy `0.680s`; Tools `1.173s` |
+| `go test -tags=integration ./internal/sandbox/...` | 0 | complete Docker/worktree integration passed in `20.723s` |
+| `make sandbox-security-test` | 0 | pinned image rebuilt; every Docker/worktree negative and cleanup-convergence case passed in `20.426s` |
+| `git diff --check` and `git diff --cached --check` | 0 | working tree and frozen index had no whitespace errors |
+| `make demo-phase4` | 0 | all five Tools passed contract/policy/audit; host path rejected; network denied; tests passed; Destroy converged |
+
+The final accepted demonstration recorded:
+
+```text
+origin_before digest=sha256:04167e14a3fa2521b6a138aaaf39e264439da230a54c5e00cee762e830071983 status=""
+host_sensitive_path_rejected error="unsafe repository path"
+network-request-denied
+origin_after  digest=sha256:04167e14a3fa2521b6a138aaaf39e264439da230a54c5e00cee762e830071983 status=""
+destroy_verified containers=0 worktree_removed=true origin_unchanged=true
+audit_artifact digest=sha256:54b367dc960b9a1d89dddd4136a9ebd5c4dcafdd02eb1793e4d75fc9c2133b55 size=6959 type=phase-4-audit-jsonl
+```
+
+### Phase-3 core Gate
+
+| Command | Exit | Key evidence |
+|---|---:|---|
+| `go test -tags=integration -count=1 ./internal/lease/... ./internal/controller/...` | 0 | Lease `2.081s`; Controller `8.900s` |
+| `go test -tags=chaos -count=1 ./internal/controller/...` | 0 | Controller Chaos passed in `44.397s` |
+| `go test -race -count=1 ./internal/...` | 0 | every internal package passed Race |
+| `make chaos-worker-kill` | 0 | `iterations=100 killed=100 succeeded=100 waiting_approval=0 artifact_present_at_kill=39` |
+| `make demo-phase3` | 0 | A token 1 killed; B token 2 takeover; restarted-A stale append rejected; final `Succeeded` |
+
+### Phase-2 and Phase-1 regression
+
+| Command | Exit | Key evidence |
+|---|---:|---|
+| `go test -tags=integration -count=1 ./internal/store/... ./internal/controller/...` | 0 | Store `8.017s`; Controller `8.715s` |
+| `go test -tags=integration -count=1 ./internal/migration/... ./cmd/agentdock` | 0 | Migration `1.473s`; CLI `1.614s` |
+| `go test -race -count=1 ./internal/store/... ./internal/controller/...` | 0 | Store and Controller passed Race |
+| `make test-rebuild-state` | 0 | domain golden/checkpoint and PostgreSQL 1000-event rebuild passed |
+| `make test-integration` | 0 | Store, Lease, Controller, Migration, and CLI integration passed |
+| exact Phase-1 six-test command, `-count=1 -v` | 0 | all planned-result/Pause/failure regressions printed PASS |
+| three Phase-1 concurrent Pause tests, `-count=50` | 0 | all 50 repetitions passed |
+
+### Full repository and environment
+
+| Command | Exit | Key evidence |
+|---|---:|---|
+| `go test -count=1 ./...` | 0 | every package, including configcheck, passed uncached |
+| `go test -race -count=1 ./...` | 0 | every package passed uncached under Race |
+| `make test` | 0 | full Go target passed |
+| `make test-race` | 0 | full Race target passed |
+| `make lint` | 0 | vet/configcheck target passed |
+| `go vet ./...` | 0 | no diagnostics |
+| `go mod verify` | 0 | `all modules verified` |
+| initial and final `make migrate` | 0 | both printed `migrations applied` |
+| `make doctor` after authorized conflict handling | 0 | Go `1.26.5`, Docker, Compose `5.1.3`, ports, YAML, and Compose model passed |
+| `make demo-fake` | 0 | successful fake Run and pause/resume both converged to `Succeeded` |
+
+The first final `make doctor` exited 2 only because another local Compose
+project's `agentdock-verify-otel-collector-1` and
+`agentdock-verify-jaeger-1` occupied 14317/14318/16687; it was not accepted.
+After explicit user authorization, those exact two previously running
+containers were temporarily stopped, default `make doctor` exited 0, and both
+were immediately restarted. Final Docker inspect reported `running=true` for
+both.
+
+Final resource checks found zero container with label `agentdock.phase=4`, an
+empty default `agentdock-worktrees` temporary root, and only
+`/Users/bytedance/Documents/Agent` in `git worktree list`. The branch was
+`codex/agentdock-verify`, HEAD was
+`9fbe37fbba9317cbba53bc17bdf85ff0e96639d3`, its parent was the required base
+`8873984c85ed7244fc46b13ff0417df013a28385`, the construction plan had no diff,
+there was no unstaged implementation change, and both index/working-tree
+`diff --check` commands passed.
+
 ## Known limitations
 
 - Docker and its daemon share/trust the host kernel. This is not a VM, a
@@ -467,14 +637,14 @@ clean. The branch and pre-commit HEAD remained exactly
   `fsync`. Audit errors remain fail-closed and are returned; the deadline is
   not a hard kernel-I/O timeout.
 
-## Independent review
+## Independent internal review
 
 `requesting-code-review` inspected both each repair increment and the complete
 `8873984c85ed7244fc46b13ff0417df013a28385..index` range from independent
 read-only contexts. Earlier No verdicts and their red→green remediation are
 recorded above; none was reused as a pass.
 
-Final production-code frozen verdicts:
+Pre-external-review production-code frozen verdicts:
 
 | Review | Critical | Important | Minor | Ready |
 |---|---:|---:|---:|---|
@@ -485,11 +655,25 @@ The complete review also confirmed Phase-4/Phase-5 scope compliance and found
 no Eino/ReplayReasoner, real model, Verifier/Repair, OTel Replay, Kubernetes,
 UI, or MCP implementation.
 
+External-review remediation verdicts are independent fresh reads of the final
+frozen candidate, not the interrupted or earlier No reviews:
+
+| Review | Critical | Important | Minor | Ready |
+|---|---:|---:|---:|---|
+| final `9fbe37f..index` remediation increment | 0 | 0 | 0 | Yes |
+| final `8873984..index` complete Phase-4 range | 0 | 0 | 0 | Yes |
+
+Earlier remediation reviews found the pre-pending directory allocation and
+premature Docker-Provider worktree cleanup issues documented above. They were
+fixed with deterministic red→green tests and then re-reviewed from the new
+frozen index; no failed review is counted as a pass.
+
 ## Gate 4
 
-**PASS.** The final frozen-candidate exact Phase-4 Gate, manual demonstration,
-Phase-3 core Gate, Phase-2/Phase-1 regression, full repository test/Race/static
-and environment checks, resource cleanup checks, and both independent reviews
-all pass with Critical 0 / Important 0. The delivery commit and post-commit
-parent/branch/clean-worktree check are the remaining mechanical handoff steps.
-Phase 5 remains unstarted.
+**PASS, pending the mechanical follow-up commit check.** The external blank
+review's Important and all five Minor findings are closed. The final remediation
+increment and complete Phase-4 range both review at Critical 0 / Important 0 /
+Minor 0, and the complete fresh verification matrix passes. The only remaining
+steps are to review this status-only evidence update, create the follow-up
+commit on top of `9fbe37f`, and confirm branch/parent/clean worktree. No push
+occurred and Phase 5 remains unstarted.

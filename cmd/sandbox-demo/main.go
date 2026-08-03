@@ -30,7 +30,7 @@ func main() {
 	}
 }
 
-func run(ctx context.Context, policyPath, image, auditPath string) error {
+func run(ctx context.Context, policyPath, image, auditPath string) (resultErr error) {
 	repository, cleanup, err := createFixtureRepository(ctx)
 	if err != nil {
 		return err
@@ -46,7 +46,9 @@ func run(ctx context.Context, policyPath, image, auditPath string) error {
 	if err != nil {
 		return err
 	}
-	defer recorder.Close()
+	defer func() {
+		resultErr = errors.Join(resultErr, recorder.Close())
+	}()
 	content, err := os.ReadFile(policyPath)
 	if err != nil {
 		return err
@@ -82,12 +84,20 @@ func run(ctx context.Context, policyPath, image, auditPath string) error {
 		RunID: "phase4-demo", AttemptID: "attempt-1", Repository: repository, Revision: "HEAD",
 	})
 	if err != nil {
-		return err
+		var destroyErr error
+		if instance != nil {
+			destroyErr = instance.Destroy(context.Background())
+		}
+		return errors.Join(err, destroyErr, provider.Cleanup(context.Background()))
 	}
 	destroyed := false
 	defer func() {
 		if !destroyed {
-			_ = instance.Destroy(context.Background())
+			resultErr = errors.Join(
+				resultErr,
+				instance.Destroy(context.Background()),
+				provider.Cleanup(context.Background()),
+			)
 		}
 	}()
 	fmt.Printf("sandbox_created workspace=%s\n", instance.Workspace())
@@ -129,6 +139,9 @@ func run(ctx context.Context, policyPath, image, auditPath string) error {
 	fmt.Printf("network_attempt_and_tests exit=%d output=%q\n", testResponse.ExitCode, strings.TrimSpace(testResponse.Stdout))
 
 	if err := instance.Destroy(ctx); err != nil {
+		return err
+	}
+	if err := provider.Cleanup(context.Background()); err != nil {
 		return err
 	}
 	destroyed = true

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -183,6 +184,183 @@ func TestLimitedBuffersShareOneCombinedOutputBudget(t *testing.T) {
 	}
 }
 
+func TestBoundedCommandOutputCapsCombinedStreams(t *testing.T) {
+	command := exec.Command(os.Args[0], "-test.run=TestBoundedCommandOutputHelperProcess")
+	command.Env = append(os.Environ(), "AGENTDOCK_BOUNDED_OUTPUT_HELPER=1")
+	output, truncated, err := boundedCommandOutput(command, 64)
+	if err != nil {
+		t.Fatalf("bounded helper command: %v", err)
+	}
+	if !truncated || len(output) != 64 {
+		t.Fatalf("bounded output length=%d truncated=%t, want 64/true", len(output), truncated)
+	}
+	if suffix := truncatedSuffix(truncated); suffix != " [output truncated]" {
+		t.Fatalf("truncation suffix = %q", suffix)
+	}
+}
+
+func TestBoundedCommandOutputHelperProcess(t *testing.T) {
+	if os.Getenv("AGENTDOCK_BOUNDED_OUTPUT_HELPER") != "1" {
+		return
+	}
+	_, _ = os.Stdout.WriteString(strings.Repeat("o", 80))
+	_, _ = os.Stderr.WriteString(strings.Repeat("e", 80))
+}
+
+func TestLateDockerCreateRemainsOwnedUntilDestroySeesIt(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workspace, ".git"), []byte(sanitizedGitPointer), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	recorder := policy.NewMemoryAuditRecorder()
+	provider := NewDockerProvider(DockerConfig{Audit: recorder})
+	ownerToken := "00112233445566778899aabbccddeeff"
+	lateID := strings.Repeat("a", 64)
+	lateVisible := false
+	removed := false
+	worktree := &destroyTestWorktree{workspace: workspace}
+	sandbox := &dockerSandbox{
+		provider:   provider,
+		config:     DockerConfig{Audit: recorder, CommandTimeout: time.Second, OutputLimit: 1024},
+		spec:       Spec{RunID: "late-create", AttemptID: "attempt-1"},
+		worktree:   worktree,
+		gitPointer: []byte("gitdir: /host/real/worktree\n"),
+		ownerToken: ownerToken,
+		containers: make(map[string]string),
+		createContainerOverride: func(context.Context, string, Request) (string, error) {
+			return "", ErrContainerOutcomeUnknown
+		},
+		inspectContainerOverride: func(string) (string, bool, bool, error) {
+			if !lateVisible {
+				return "", false, false, nil
+			}
+			return lateID, true, true, nil
+		},
+		removeOwnedContainerOverride: func(reference string) (bool, error) {
+			if reference != lateID {
+				t.Fatalf("remove reference = %q, want late ID", reference)
+			}
+			removed = true
+			return true, nil
+		},
+		containerReinspectDelay: -1,
+		scanOwnedContainersOverride: func() error {
+			return nil
+		},
+		cleanupWorkspaceOverride: func(context.Context) error { return nil },
+	}
+	provider.owners.Store(ownerToken, sandbox.Scope())
+	provider.pending.Store(ownerToken, sandbox)
+	_, executeErr := sandbox.Execute(context.Background(), Request{
+		Command:  []string{"agentdock-sandbox-helper", "probe", "user"},
+		ToolName: "late-create-test",
+	})
+	if !errors.Is(executeErr, ErrContainerOutcomeUnknown) {
+		t.Fatalf("Execute error = %v, want outcome unknown", executeErr)
+	}
+	if len(sandbox.containers) != 1 {
+		t.Fatalf("unknown create name was forgotten: %#v", sandbox.containers)
+	}
+	lateVisible = true
+	if err := sandbox.Destroy(context.Background()); err != nil {
+		t.Fatalf("Destroy late-created container: %v", err)
+	}
+	if !removed || len(sandbox.containers) != 0 {
+		t.Fatalf("late container cleanup removed=%t tracked=%#v", removed, sandbox.containers)
+	}
+	if _, ok := provider.owners.Load(ownerToken); ok {
+		t.Fatal("late-create owner remains after converged Destroy")
+	}
+	if _, ok := provider.pending.Load(ownerToken); ok {
+		t.Fatal("late-create pending handle remains after converged Destroy")
+	}
+}
+
+func TestDockerProviderCleanupRetainsWorktreeUntilContainersConverge(t *testing.T) {
+	workspace := filepath.Join(t.TempDir(), "owned-worktree")
+	if err := os.Mkdir(workspace, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	recorder := policy.NewMemoryAuditRecorder()
+	provider := NewDockerProvider(DockerConfig{Audit: recorder})
+	worktreeCleanupCalls := 0
+	provider.worktrees.cleanupOverride = func(context.Context, string, string, string) error {
+		worktreeCleanupCalls++
+		return os.RemoveAll(workspace)
+	}
+	worktree := &gitWorktree{
+		provider:  provider.worktrees,
+		root:      filepath.Dir(workspace),
+		workspace: workspace,
+		scope:     Scope{RunID: "provider-cleanup", AttemptID: "attempt-1"},
+	}
+	provider.worktrees.pending.Store(workspace, worktree)
+	ownerToken := "11223344556677889900aabbccddeeff"
+	lateID := strings.Repeat("b", 64)
+	lateVisible := false
+	removed := false
+	sandbox := &dockerSandbox{
+		provider:            provider,
+		config:              DockerConfig{Audit: recorder},
+		spec:                Spec{RunID: "provider-cleanup", AttemptID: "attempt-1"},
+		worktree:            worktree,
+		ownerToken:          ownerToken,
+		containers:          map[string]string{"late-create": ""},
+		uncertainContainers: map[string]time.Time{"late-create": time.Now().Add(time.Minute)},
+		inspectContainerOverride: func(string) (string, bool, bool, error) {
+			if !lateVisible {
+				return "", false, false, nil
+			}
+			return lateID, true, true, nil
+		},
+		removeOwnedContainerOverride: func(reference string) (bool, error) {
+			if reference != lateID {
+				t.Fatalf("remove reference = %q, want %q", reference, lateID)
+			}
+			removed = true
+			return true, nil
+		},
+		scanOwnedContainersOverride: func() error { return nil },
+		cleanupWorkspaceOverride: func(context.Context) error {
+			_, err := os.Stat(workspace)
+			return err
+		},
+	}
+	provider.owners.Store(ownerToken, sandbox.Scope())
+	provider.pending.Store(ownerToken, sandbox)
+
+	firstErr := provider.Cleanup(context.Background())
+	if !errors.Is(firstErr, ErrContainerOutcomeUnknown) {
+		t.Fatalf("first Provider Cleanup error = %v, want outcome unknown", firstErr)
+	}
+	if worktreeCleanupCalls != 0 {
+		t.Fatalf("Provider cleaned worktree before containers converged: calls=%d", worktreeCleanupCalls)
+	}
+	if _, err := os.Stat(workspace); err != nil {
+		t.Fatalf("worktree not retained after unresolved container: %v", err)
+	}
+
+	lateVisible = true
+	if err := provider.Cleanup(context.Background()); err != nil {
+		t.Fatalf("retry Provider Cleanup: %v", err)
+	}
+	if !removed || worktreeCleanupCalls != 1 {
+		t.Fatalf("retry cleanup removed=%t worktree_calls=%d", removed, worktreeCleanupCalls)
+	}
+	if _, err := os.Stat(workspace); !os.IsNotExist(err) {
+		t.Fatalf("worktree remains after converged cleanup: %v", err)
+	}
+	if len(sandbox.containers) != 0 || len(provider.worktrees.PendingWorktrees()) != 0 {
+		t.Fatalf("resources remain: containers=%#v worktrees=%#v", sandbox.containers, provider.worktrees.PendingWorktrees())
+	}
+	if _, ok := provider.pending.Load(ownerToken); ok {
+		t.Fatal("sandbox pending handle remains after converged cleanup")
+	}
+	if _, ok := provider.owners.Load(ownerToken); ok {
+		t.Fatal("owner token remains after converged cleanup")
+	}
+}
+
 func TestDestroyRetriesAuditAfterResourcesAreAlreadyGone(t *testing.T) {
 	recorder := &failOnceAuditRecorder{}
 	sandbox := &dockerSandbox{
@@ -253,14 +431,16 @@ func TestDestroyFailureIsOneWayAndResanitizesGitPointer(t *testing.T) {
 	provider := NewDockerProvider(DockerConfig{Audit: recorder})
 	ownerToken := "00112233445566778899aabbccddeeff"
 	sandbox := &dockerSandbox{
-		provider:                 provider,
-		config:                   DockerConfig{Audit: recorder},
-		spec:                     Spec{RunID: "run", AttemptID: "attempt"},
-		worktree:                 worktree,
-		gitPointer:               []byte("gitdir: /host/real/worktree\n"),
-		ownerToken:               ownerToken,
-		containers:               make(map[string]string),
-		cleanupWorkspaceOverride: func(context.Context) error { return nil },
+		provider:                    provider,
+		config:                      DockerConfig{Audit: recorder},
+		spec:                        Spec{RunID: "run", AttemptID: "attempt"},
+		worktree:                    worktree,
+		gitPointer:                  []byte("gitdir: /host/real/worktree\n"),
+		gitPointerSanitized:         true,
+		ownerToken:                  ownerToken,
+		containers:                  make(map[string]string),
+		scanOwnedContainersOverride: func() error { return nil },
+		cleanupWorkspaceOverride:    func(context.Context) error { return nil },
 	}
 	provider.owners.Store(ownerToken, sandbox.Scope())
 	if err := sandbox.Destroy(context.Background()); !errors.Is(err, destroyErr) {
@@ -302,14 +482,16 @@ func TestDestroyConvergesWhenGitRestoreFailsAfterWorktreeRemoval(t *testing.T) {
 	provider := NewDockerProvider(DockerConfig{Audit: recorder})
 	ownerToken := "ffeeddccbbaa99887766554433221100"
 	sandbox := &dockerSandbox{
-		provider:                 provider,
-		config:                   DockerConfig{Audit: recorder},
-		spec:                     Spec{RunID: "run", AttemptID: "attempt"},
-		worktree:                 worktree,
-		gitPointer:               []byte("gitdir: /host/real/worktree\n"),
-		ownerToken:               ownerToken,
-		containers:               make(map[string]string),
-		cleanupWorkspaceOverride: func(context.Context) error { return nil },
+		provider:                    provider,
+		config:                      DockerConfig{Audit: recorder},
+		spec:                        Spec{RunID: "run", AttemptID: "attempt"},
+		worktree:                    worktree,
+		gitPointer:                  []byte("gitdir: /host/real/worktree\n"),
+		gitPointerSanitized:         true,
+		ownerToken:                  ownerToken,
+		containers:                  make(map[string]string),
+		scanOwnedContainersOverride: func() error { return nil },
+		cleanupWorkspaceOverride:    func(context.Context) error { return nil },
 	}
 	provider.owners.Store(ownerToken, sandbox.Scope())
 	if err := sandbox.Destroy(context.Background()); err == nil {

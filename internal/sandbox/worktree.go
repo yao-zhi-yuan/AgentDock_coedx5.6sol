@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,7 +18,16 @@ import (
 )
 
 type GitWorktreeProvider struct {
-	root string
+	root    string
+	mu      sync.Mutex
+	pending sync.Map // canonical workspace -> *gitWorktree
+
+	// Internal deterministic failure-injection seams. They remain nil in
+	// production and let tests prove that failed external side effects retain a
+	// provider-owned cleanup handle.
+	validateAllocatedOverride func(string) error
+	materializeOverride       func(context.Context, string, string, string) error
+	cleanupOverride           func(context.Context, string, string, string) error
 }
 
 func NewGitWorktreeProvider(root string) *GitWorktreeProvider {
@@ -25,6 +35,8 @@ func NewGitWorktreeProvider(root string) *GitWorktreeProvider {
 }
 
 func (provider *GitWorktreeProvider) Create(ctx context.Context, spec Spec) (Sandbox, error) {
+	provider.mu.Lock()
+	defer provider.mu.Unlock()
 	if spec.RunID == "" ||
 		spec.AttemptID == "" ||
 		spec.Repository == "" ||
@@ -97,31 +109,35 @@ func (provider *GitWorktreeProvider) Create(ctx context.Context, spec Spec) (San
 	if pathWithin(canonicalRepository, canonicalRoot) {
 		return nil, errors.New("canonical worktree root must be outside the source repository")
 	}
-	temporary, err := os.MkdirTemp(absoluteRoot, safeName(spec.RunID)+"-"+safeName(spec.AttemptID)+"-")
-	if err != nil {
-		return nil, fmt.Errorf("allocate worktree path: %w", err)
-	}
-	temporaryInfo, err := os.Lstat(temporary)
-	if err != nil || !temporaryInfo.IsDir() || temporaryInfo.Mode().Perm() != 0o700 {
-		_ = os.Remove(temporary)
-		return nil, errors.New("allocated worktree path is not a private directory")
-	}
-	canonicalTemporary, err := filepath.EvalSymlinks(temporary)
-	if err != nil || !pathWithin(canonicalRoot, canonicalTemporary) {
-		_ = os.Remove(temporary)
-		return nil, errors.New("allocated worktree path escaped the configured root")
-	}
-	temporary = canonicalTemporary
-	if err := os.Remove(temporary); err != nil {
-		return nil, fmt.Errorf("prepare worktree path: %w", err)
-	}
-	revision, err := gitOutput(ctx, canonicalRepository, "rev-parse", "--verify", spec.Revision+"^{commit}")
+	worktree, err := provider.allocatePendingWorktree(
+		canonicalRepository,
+		canonicalRoot,
+		spec,
+	)
 	if err != nil {
 		return nil, err
 	}
+	temporary := worktree.workspace
+	validateAllocated := validateAllocatedWorktree
+	if provider.validateAllocatedOverride != nil {
+		validateAllocated = provider.validateAllocatedOverride
+	}
+	if err := validateAllocated(temporary); err != nil {
+		return provider.failedCreate(worktree, err)
+	}
+	if err := os.Remove(temporary); err != nil {
+		return provider.failedCreate(worktree, fmt.Errorf("prepare worktree path: %w", err))
+	}
+	revision, err := gitOutput(ctx, canonicalRepository, "rev-parse", "--verify", spec.Revision+"^{commit}")
+	if err != nil {
+		return provider.failedCreate(worktree, err)
+	}
 	revision = strings.TrimSpace(revision)
 	if !isObjectID(revision) {
-		return nil, fmt.Errorf("revision resolved to invalid object ID %q", revision)
+		return provider.failedCreate(
+			worktree,
+			fmt.Errorf("revision resolved to invalid object ID %q", revision),
+		)
 	}
 	if _, err := gitOutput(
 		ctx,
@@ -133,26 +149,113 @@ func (provider *GitWorktreeProvider) Create(ctx context.Context, spec Spec) (San
 		temporary,
 		revision,
 	); err != nil {
-		cleanupErr := cleanupKnownWorktree(canonicalRepository, canonicalRoot, temporary)
-		return nil, errors.Join(fmt.Errorf("create no-checkout Git worktree: %w", err), cleanupErr)
+		return provider.failedCreate(
+			worktree,
+			fmt.Errorf("create no-checkout Git worktree: %w", err),
+		)
 	}
-	if err := materializeGitTree(ctx, canonicalRepository, temporary, revision); err != nil {
-		cleanupErr := cleanupKnownWorktree(canonicalRepository, canonicalRoot, temporary)
-		return nil, errors.Join(fmt.Errorf("materialize Git tree: %w", err), cleanupErr)
+	materialize := materializeGitTree
+	if provider.materializeOverride != nil {
+		materialize = provider.materializeOverride
 	}
-	return &gitWorktree{
-		repository: canonicalRepository,
-		root:       canonicalRoot,
-		workspace:  temporary,
-		scope: Scope{
-			RunID:     spec.RunID,
-			AttemptID: spec.AttemptID,
-		},
-	}, nil
+	if err := materialize(ctx, canonicalRepository, temporary, revision); err != nil {
+		return provider.failedCreate(worktree, fmt.Errorf("materialize Git tree: %w", err))
+	}
+	return worktree, nil
+}
+
+func (provider *GitWorktreeProvider) allocatePendingWorktree(
+	repository string,
+	root string,
+	spec Spec,
+) (*gitWorktree, error) {
+	for attempt := 0; attempt < 8; attempt++ {
+		token, err := newOwnerToken()
+		if err != nil {
+			return nil, fmt.Errorf("generate worktree path token: %w", err)
+		}
+		workspace := filepath.Join(
+			root,
+			safeName(spec.RunID)+"-"+safeName(spec.AttemptID)+"-"+token,
+		)
+		if !pathWithin(root, workspace) || workspace == root {
+			return nil, errors.New("generated worktree path escaped the configured root")
+		}
+		worktree := &gitWorktree{
+			provider:   provider,
+			repository: repository,
+			root:       root,
+			workspace:  workspace,
+			scope: Scope{
+				RunID:     spec.RunID,
+				AttemptID: spec.AttemptID,
+			},
+		}
+		if _, loaded := provider.pending.LoadOrStore(workspace, worktree); loaded {
+			continue
+		}
+		// Provider ownership exists before the atomic per-run directory side
+		// effect. EEXIST means the Provider never owned the pre-existing path, so
+		// it drops only its in-memory claim and chooses another random candidate.
+		if err := os.Mkdir(workspace, 0o700); err != nil {
+			provider.pending.Delete(workspace)
+			if errors.Is(err, fs.ErrExist) {
+				continue
+			}
+			return nil, fmt.Errorf("allocate worktree path: %w", err)
+		}
+		return worktree, nil
+	}
+	return nil, errors.New("allocate unique worktree path after 8 attempts")
+}
+
+func validateAllocatedWorktree(workspace string) error {
+	info, err := os.Lstat(workspace)
+	if err != nil || !info.IsDir() || info.Mode().Perm() != 0o700 {
+		return errors.New("allocated worktree path is not a private directory")
+	}
+	canonical, err := filepath.EvalSymlinks(workspace)
+	if err != nil || canonical != workspace {
+		return errors.New("allocated worktree path changed during validation")
+	}
+	return nil
+}
+
+func (provider *GitWorktreeProvider) failedCreate(worktree *gitWorktree, cause error) (Sandbox, error) {
+	cleanupErr := worktree.Destroy(context.Background())
+	if cleanupErr == nil {
+		return nil, cause
+	}
+	return worktree, errors.Join(cause, cleanupErr)
+}
+
+// Cleanup retries every worktree path still owned by this Provider. It is the
+// fallback when a caller ignores the non-nil cleanup handle returned together
+// with a provisioning error.
+func (provider *GitWorktreeProvider) Cleanup(ctx context.Context) error {
+	provider.mu.Lock()
+	defer provider.mu.Unlock()
+	var cleanupErr error
+	provider.pending.Range(func(_, value any) bool {
+		cleanupErr = errors.Join(cleanupErr, value.(*gitWorktree).Destroy(ctx))
+		return true
+	})
+	return cleanupErr
+}
+
+func (provider *GitWorktreeProvider) PendingWorktrees() []string {
+	var workspaces []string
+	provider.pending.Range(func(key, _ any) bool {
+		workspaces = append(workspaces, key.(string))
+		return true
+	})
+	sort.Strings(workspaces)
+	return workspaces
 }
 
 type gitWorktree struct {
 	mu         sync.Mutex
+	provider   *GitWorktreeProvider
 	repository string
 	root       string
 	workspace  string
@@ -180,7 +283,11 @@ func (worktree *gitWorktree) Destroy(ctx context.Context) error {
 	}
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	if err := cleanupKnownWorktreeContext(
+	cleanup := cleanupKnownWorktreeContext
+	if worktree.provider != nil && worktree.provider.cleanupOverride != nil {
+		cleanup = worktree.provider.cleanupOverride
+	}
+	if err := cleanup(
 		cleanupCtx,
 		worktree.repository,
 		worktree.root,
@@ -189,6 +296,9 @@ func (worktree *gitWorktree) Destroy(ctx context.Context) error {
 		return err
 	}
 	worktree.destroyed = true
+	if worktree.provider != nil {
+		worktree.provider.pending.Delete(worktree.workspace)
+	}
 	return nil
 }
 
@@ -394,14 +504,14 @@ func cleanupKnownWorktreeContext(ctx context.Context, repository, root, workspac
 		return errors.New("refusing to clean worktree outside configured root")
 	}
 	command := safeGitCommand(ctx, repository, "worktree", "remove", "--force", workspace)
-	output, removeErr := command.CombinedOutput()
+	output, outputTruncated, removeErr := boundedCommandOutput(command, 64<<10)
 	registered, inspectErr := worktreeRegistered(ctx, repository, workspace)
 	if inspectErr != nil {
 		if removeErr == nil {
 			return fmt.Errorf("verify removed Git worktree registration: %w", inspectErr)
 		}
 		return errors.Join(
-			fmt.Errorf("remove Git worktree: %w: %s", removeErr, strings.TrimSpace(string(output))),
+			fmt.Errorf("remove Git worktree: %w: %s%s", removeErr, strings.TrimSpace(string(output)), truncatedSuffix(outputTruncated)),
 			inspectErr,
 		)
 	}
@@ -409,12 +519,35 @@ func cleanupKnownWorktreeContext(ctx context.Context, repository, root, workspac
 		if removeErr == nil {
 			return errors.New("worktree remains registered after successful remove")
 		}
-		return fmt.Errorf("remove Git worktree: %w: %s", removeErr, strings.TrimSpace(string(output)))
+		return fmt.Errorf(
+			"remove Git worktree: %w: %s%s",
+			removeErr,
+			strings.TrimSpace(string(output)),
+			truncatedSuffix(outputTruncated),
+		)
 	}
 	if err := os.RemoveAll(workspace); err != nil {
 		return fmt.Errorf("remove unregistered disposable worktree: %w", err)
 	}
 	return nil
+}
+
+func boundedCommandOutput(command *exec.Cmd, limit int) ([]byte, bool, error) {
+	budget := &outputBudget{limit: limit}
+	stdout := &limitedBuffer{budget: budget}
+	stderr := &limitedBuffer{budget: budget}
+	command.Stdout = stdout
+	command.Stderr = stderr
+	err := command.Run()
+	output := append(stdout.Bytes(), stderr.Bytes()...)
+	return output, budget.truncated, err
+}
+
+func truncatedSuffix(truncated bool) string {
+	if truncated {
+		return " [output truncated]"
+	}
+	return ""
 }
 
 func worktreeRegistered(ctx context.Context, repository, workspace string) (bool, error) {

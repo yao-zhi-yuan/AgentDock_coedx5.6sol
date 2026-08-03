@@ -395,6 +395,150 @@ func TestDestroyRecoversUnresolvedOwnedContainerName(t *testing.T) {
 	}
 }
 
+func TestDockerCreateAuditRollbackFailureReturnsProviderCleanupHandle(t *testing.T) {
+	repository := newFixtureRepository(t)
+	beforeDigest := repositoryDigest(t, repository)
+	beforeStatus := gitTestOutput(t, repository, "status", "--porcelain=v1")
+	recorder := &failOnceAuditRecorder{}
+	provider := NewDockerProvider(DockerConfig{Image: TestImage, Audit: recorder})
+	cleanupErr := errors.New("injected worktree destroy failure")
+	provider.worktrees.cleanupOverride = func(context.Context, string, string, string) error {
+		return cleanupErr
+	}
+	instance, createErr := provider.Create(context.Background(), Spec{
+		RunID: "audit-rollback", AttemptID: "attempt-1", Repository: repository, Revision: "HEAD",
+	})
+	if instance == nil || !errors.Is(createErr, cleanupErr) {
+		t.Fatalf("Create handle=%#v error=%v", instance, createErr)
+	}
+	docker := instance.(*dockerSandbox)
+	workspace := instance.Workspace()
+	if _, ok := provider.pending.Load(docker.ownerToken); !ok {
+		t.Fatal("provider lost failed-provisioning cleanup handle")
+	}
+	if registered, err := worktreeRegistered(context.Background(), repository, workspace); err != nil || !registered {
+		t.Fatalf("failed rollback registration registered=%t err=%v", registered, err)
+	}
+	provider.worktrees.cleanupOverride = nil
+	if err := provider.Cleanup(context.Background()); err != nil {
+		t.Fatalf("provider retry cleanup: %v", err)
+	}
+	if registered, err := worktreeRegistered(context.Background(), repository, workspace); err != nil || registered {
+		t.Fatalf("registration after retry registered=%t err=%v", registered, err)
+	}
+	if _, err := os.Stat(workspace); !os.IsNotExist(err) {
+		t.Fatalf("temporary directory remains after retry: %v", err)
+	}
+	if containers := provider.ActiveContainers(context.Background()); len(containers) != 0 {
+		t.Fatalf("owned containers remain after retry: %v", containers)
+	}
+	if pending := provider.worktrees.PendingWorktrees(); len(pending) != 0 {
+		t.Fatalf("pending worktrees remain after retry: %v", pending)
+	}
+	if _, ok := provider.pending.Load(docker.ownerToken); ok {
+		t.Fatal("provider sandbox cleanup handle remains after retry")
+	}
+	if _, ok := provider.owners.Load(docker.ownerToken); ok {
+		t.Fatal("provider owner token remains after retry")
+	}
+	if after := repositoryDigest(t, repository); after != beforeDigest {
+		t.Fatalf("origin digest changed: before=%s after=%s", beforeDigest, after)
+	}
+	if after := gitTestOutput(t, repository, "status", "--porcelain=v1"); after != beforeStatus {
+		t.Fatalf("origin Git status changed: before=%q after=%q", beforeStatus, after)
+	}
+}
+
+func TestDestroyScansOwnedContainersMissingFromTracking(t *testing.T) {
+	repository := newFixtureRepository(t)
+	provider := NewDockerProvider(DockerConfig{Image: TestImage, Audit: policy.NewMemoryAuditRecorder()})
+	instance, err := provider.Create(context.Background(), Spec{
+		RunID: "scan-fallback", AttemptID: "attempt-1", Repository: repository, Revision: "HEAD",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	docker := instance.(*dockerSandbox)
+	containerID := createForeignContainer(t, docker.nextContainerName("late"), docker.config.Image, map[string]string{
+		"agentdock.phase":       "4",
+		"agentdock.run_id":      docker.spec.RunID,
+		"agentdock.attempt_id":  docker.spec.AttemptID,
+		"agentdock.owner_token": docker.ownerToken,
+	})
+	if len(docker.containers) != 0 {
+		t.Fatalf("fixture unexpectedly tracked fallback container: %#v", docker.containers)
+	}
+	if err := instance.Destroy(context.Background()); err != nil {
+		t.Fatalf("Destroy provider scan fallback: %v", err)
+	}
+	if output, inspectErr := exec.Command("docker", "inspect", containerID).CombinedOutput(); inspectErr == nil {
+		t.Fatalf("untracked owned container remains after Destroy: %s", output)
+	}
+}
+
+func TestDestroyFallbackScanSkipsCrossProviderAndForgedScope(t *testing.T) {
+	repository := newFixtureRepository(t)
+	spec := Spec{
+		RunID: "fallback-owner-run", AttemptID: "attempt-1", Repository: repository, Revision: "HEAD",
+	}
+	providerA := NewDockerProvider(DockerConfig{Image: TestImage, Audit: policy.NewMemoryAuditRecorder()})
+	providerB := NewDockerProvider(DockerConfig{Image: TestImage, Audit: policy.NewMemoryAuditRecorder()})
+	instanceA, err := providerA.Create(context.Background(), spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	instanceB, err := providerB.Create(context.Background(), spec)
+	if err != nil {
+		_ = instanceA.Destroy(context.Background())
+		t.Fatal(err)
+	}
+	first := instanceA.(*dockerSandbox)
+	second := instanceB.(*dockerSandbox)
+	crossProviderID := createForeignContainer(
+		t,
+		second.nextContainerName("fallback"),
+		second.config.Image,
+		map[string]string{
+			"agentdock.phase":       "4",
+			"agentdock.run_id":      second.spec.RunID,
+			"agentdock.attempt_id":  second.spec.AttemptID,
+			"agentdock.owner_token": second.ownerToken,
+		},
+	)
+	forgedScopeID := createForeignContainer(
+		t,
+		first.nextContainerName("forged"),
+		first.config.Image,
+		map[string]string{
+			"agentdock.phase":       "4",
+			"agentdock.run_id":      first.spec.RunID,
+			"agentdock.attempt_id":  "foreign-attempt",
+			"agentdock.owner_token": first.ownerToken,
+		},
+	)
+	t.Cleanup(func() {
+		_, _ = exec.Command("docker", "rm", "-f", crossProviderID, forgedScopeID).CombinedOutput()
+	})
+
+	if err := instanceA.Destroy(context.Background()); err != nil {
+		t.Fatalf("Destroy provider A: %v", err)
+	}
+	for _, foreignID := range []string{crossProviderID, forgedScopeID} {
+		if output, inspectErr := exec.Command("docker", "inspect", foreignID).CombinedOutput(); inspectErr != nil {
+			t.Fatalf("provider A removed foreign container %s: %v\n%s", foreignID, inspectErr, output)
+		}
+	}
+	if err := instanceB.Destroy(context.Background()); err != nil {
+		t.Fatalf("Destroy provider B: %v", err)
+	}
+	if output, inspectErr := exec.Command("docker", "inspect", crossProviderID).CombinedOutput(); inspectErr == nil {
+		t.Fatalf("provider B did not remove its untracked owned container: %s", output)
+	}
+	if output, inspectErr := exec.Command("docker", "inspect", forgedScopeID).CombinedOutput(); inspectErr != nil {
+		t.Fatalf("forged-scope container was removed: %v\n%s", inspectErr, output)
+	}
+}
+
 func TestSandboxHelperRejectsAbsoluteTraversalAndSymlinkEscape(t *testing.T) {
 	repository := newFixtureRepository(t)
 	outside := filepath.Join(t.TempDir(), "outside-secret")

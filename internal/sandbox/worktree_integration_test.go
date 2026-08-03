@@ -4,6 +4,7 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -64,6 +65,102 @@ func TestGitWorktreeProviderIsAttemptScopedAndDestroyLeavesOriginUnchanged(t *te
 		if _, err := os.Stat(workspace); !os.IsNotExist(err) {
 			t.Fatalf("worktree still exists after Destroy: %s (%v)", workspace, err)
 		}
+	}
+	if after := repositoryDigest(t, repository); after != beforeDigest {
+		t.Fatalf("origin digest changed: before=%s after=%s", beforeDigest, after)
+	}
+	if after := gitTestOutput(t, repository, "status", "--porcelain=v1"); after != beforeStatus {
+		t.Fatalf("origin Git status changed: before=%q after=%q", beforeStatus, after)
+	}
+}
+
+func TestGitWorktreeMaterializeRollbackFailureReturnsRetryableHandle(t *testing.T) {
+	repository := newFixtureRepository(t)
+	beforeDigest := repositoryDigest(t, repository)
+	beforeStatus := gitTestOutput(t, repository, "status", "--porcelain=v1")
+	provider := NewGitWorktreeProvider(filepath.Join(t.TempDir(), "worktrees"))
+	materializeErr := errors.New("injected materialize failure")
+	cleanupErr := errors.New("injected worktree cleanup failure")
+	provider.materializeOverride = func(context.Context, string, string, string) error {
+		return materializeErr
+	}
+	provider.cleanupOverride = func(context.Context, string, string, string) error {
+		return cleanupErr
+	}
+	instance, createErr := provider.Create(context.Background(), Spec{
+		RunID: "materialize-failure", AttemptID: "attempt-1", Repository: repository, Revision: "HEAD",
+	})
+	if instance == nil || !errors.Is(createErr, materializeErr) || !errors.Is(createErr, cleanupErr) {
+		t.Fatalf("Create handle=%#v error=%v", instance, createErr)
+	}
+	workspace := instance.Workspace()
+	if registered, err := worktreeRegistered(context.Background(), repository, workspace); err != nil || !registered {
+		t.Fatalf("failed rollback registration registered=%t err=%v", registered, err)
+	}
+	if pending := provider.PendingWorktrees(); len(pending) != 1 || pending[0] != workspace {
+		t.Fatalf("pending worktrees = %#v, want %q", pending, workspace)
+	}
+	provider.cleanupOverride = nil
+	if err := provider.Cleanup(context.Background()); err != nil {
+		t.Fatalf("provider retry cleanup: %v", err)
+	}
+	if registered, err := worktreeRegistered(context.Background(), repository, workspace); err != nil || registered {
+		t.Fatalf("registration after retry registered=%t err=%v", registered, err)
+	}
+	if _, err := os.Stat(workspace); !os.IsNotExist(err) {
+		t.Fatalf("temporary directory remains after retry: %v", err)
+	}
+	if pending := provider.PendingWorktrees(); len(pending) != 0 {
+		t.Fatalf("pending worktrees remain: %#v", pending)
+	}
+	if after := repositoryDigest(t, repository); after != beforeDigest {
+		t.Fatalf("origin digest changed: before=%s after=%s", beforeDigest, after)
+	}
+	if after := gitTestOutput(t, repository, "status", "--porcelain=v1"); after != beforeStatus {
+		t.Fatalf("origin Git status changed: before=%q after=%q", beforeStatus, after)
+	}
+}
+
+func TestGitWorktreePostMkdirValidationFailureRetainsCleanupHandle(t *testing.T) {
+	repository := newFixtureRepository(t)
+	beforeDigest := repositoryDigest(t, repository)
+	beforeStatus := gitTestOutput(t, repository, "status", "--porcelain=v1")
+	provider := NewGitWorktreeProvider(filepath.Join(t.TempDir(), "worktrees"))
+	validationErr := errors.New("injected post-mkdir validation failure")
+	cleanupErr := errors.New("injected allocated-directory cleanup failure")
+	provider.validateAllocatedOverride = func(string) error {
+		return validationErr
+	}
+	provider.cleanupOverride = func(context.Context, string, string, string) error {
+		return cleanupErr
+	}
+	instance, createErr := provider.Create(context.Background(), Spec{
+		RunID: "mkdir-validation", AttemptID: "attempt-1", Repository: repository, Revision: "HEAD",
+	})
+	if instance == nil || !errors.Is(createErr, validationErr) || !errors.Is(createErr, cleanupErr) {
+		t.Fatalf("Create handle=%#v error=%v", instance, createErr)
+	}
+	workspace := instance.Workspace()
+	if _, err := os.Stat(workspace); err != nil {
+		t.Fatalf("owned allocated directory was lost: %v", err)
+	}
+	if registered, err := worktreeRegistered(context.Background(), repository, workspace); err != nil || registered {
+		t.Fatalf("pre-add failure registration registered=%t err=%v", registered, err)
+	}
+	if pending := provider.PendingWorktrees(); len(pending) != 1 || pending[0] != workspace {
+		t.Fatalf("pending worktrees = %#v, want %q", pending, workspace)
+	}
+
+	provider.validateAllocatedOverride = nil
+	provider.cleanupOverride = nil
+	if err := provider.Cleanup(context.Background()); err != nil {
+		t.Fatalf("provider retry cleanup: %v", err)
+	}
+	if _, err := os.Stat(workspace); !os.IsNotExist(err) {
+		t.Fatalf("allocated directory remains after retry: %v", err)
+	}
+	if pending := provider.PendingWorktrees(); len(pending) != 0 {
+		t.Fatalf("pending worktrees remain: %#v", pending)
 	}
 	if after := repositoryDigest(t, repository); after != beforeDigest {
 		t.Fatalf("origin digest changed: before=%s after=%s", beforeDigest, after)
