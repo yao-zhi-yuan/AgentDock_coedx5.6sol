@@ -10,6 +10,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/agentdock/agentdock-verify/internal/policy"
 )
 
 func TestGitWorktreeProviderIsAttemptScopedAndDestroyLeavesOriginUnchanged(t *testing.T) {
@@ -161,6 +164,113 @@ func TestGitWorktreePostMkdirValidationFailureRetainsCleanupHandle(t *testing.T)
 	}
 	if pending := provider.PendingWorktrees(); len(pending) != 0 {
 		t.Fatalf("pending worktrees remain: %#v", pending)
+	}
+	if after := repositoryDigest(t, repository); after != beforeDigest {
+		t.Fatalf("origin digest changed: before=%s after=%s", beforeDigest, after)
+	}
+	if after := gitTestOutput(t, repository, "status", "--porcelain=v1"); after != beforeStatus {
+		t.Fatalf("origin Git status changed: before=%q after=%q", beforeStatus, after)
+	}
+}
+
+func TestExpiredUnknownCreateEmptyObservationsRetainWorktreeUntilLateVisibility(t *testing.T) {
+	repository := newFixtureRepository(t)
+	beforeDigest := repositoryDigest(t, repository)
+	beforeStatus := gitTestOutput(t, repository, "status", "--porcelain=v1")
+	root := filepath.Join(t.TempDir(), "worktrees")
+	recorder := policy.NewMemoryAuditRecorder()
+	provider := NewDockerProvider(DockerConfig{Audit: recorder, WorktreeRoot: root})
+	spec := Spec{
+		RunID: "expired-unknown", AttemptID: "attempt-1", Repository: repository, Revision: "HEAD",
+	}
+	worktree, err := provider.worktrees.Create(context.Background(), spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = provider.worktrees.Cleanup(context.Background()) })
+	workspace := worktree.Workspace()
+	ownerToken := "3344556677889900aabbccddeeff1122"
+	lateID := strings.Repeat("c", 64)
+	lateVisible := false
+	nameNotFound := 0
+	emptyOwnerScans := 0
+	removed := false
+	docker := &dockerSandbox{
+		provider:            provider,
+		config:              DockerConfig{Audit: recorder},
+		spec:                spec,
+		worktree:            worktree,
+		ownerToken:          ownerToken,
+		containers:          map[string]string{"late-after-empty-scan": ""},
+		uncertainContainers: map[string]time.Time{"late-after-empty-scan": time.Now().Add(-time.Hour)},
+		inspectContainerOverride: func(string) (string, bool, bool, error) {
+			if !lateVisible {
+				nameNotFound++
+				return "", false, false, nil
+			}
+			return lateID, true, true, nil
+		},
+		removeOwnedContainerOverride: func(reference string) (bool, error) {
+			if reference != lateID {
+				t.Fatalf("remove reference = %q, want %q", reference, lateID)
+			}
+			removed = true
+			return true, nil
+		},
+		scanOwnedContainersOverride: func() error {
+			emptyOwnerScans++
+			return nil
+		},
+		cleanupWorkspaceOverride: func(context.Context) error { return nil },
+	}
+	provider.owners.Store(ownerToken, docker.Scope())
+	provider.pending.Store(ownerToken, docker)
+
+	firstErr := docker.Destroy(context.Background())
+	if !errors.Is(firstErr, ErrContainerOutcomeUnknown) {
+		t.Fatalf("first Destroy error = %v, want outcome unknown", firstErr)
+	}
+	if nameNotFound < 2 || emptyOwnerScans != 1 {
+		t.Fatalf("empty observations: name=%d owner_scans=%d", nameNotFound, emptyOwnerScans)
+	}
+	if _, err := os.Stat(workspace); err != nil {
+		t.Fatalf("first Destroy removed worktree: %v", err)
+	}
+	if registered, err := worktreeRegistered(context.Background(), repository, workspace); err != nil || !registered {
+		t.Fatalf("first Destroy registration registered=%t err=%v", registered, err)
+	}
+	if _, ok := provider.pending.Load(ownerToken); !ok {
+		t.Fatal("first Destroy lost pending Sandbox")
+	}
+	if _, ok := provider.owners.Load(ownerToken); !ok {
+		t.Fatal("first Destroy lost owner token")
+	}
+
+	lateVisible = true
+	if err := docker.Destroy(context.Background()); err != nil {
+		t.Fatalf("Destroy after late visibility: %v", err)
+	}
+	if !removed || len(docker.containers) != 0 {
+		t.Fatalf("late cleanup removed=%t containers=%#v", removed, docker.containers)
+	}
+	if registered, err := worktreeRegistered(context.Background(), repository, workspace); err != nil || registered {
+		t.Fatalf("final registration registered=%t err=%v", registered, err)
+	}
+	if _, err := os.Stat(workspace); !os.IsNotExist(err) {
+		t.Fatalf("temporary worktree remains: %v", err)
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 || len(provider.worktrees.PendingWorktrees()) != 0 {
+		t.Fatalf("temporary resources remain: entries=%d pending=%#v", len(entries), provider.worktrees.PendingWorktrees())
+	}
+	if _, ok := provider.pending.Load(ownerToken); ok {
+		t.Fatal("final pending Sandbox remains")
+	}
+	if _, ok := provider.owners.Load(ownerToken); ok {
+		t.Fatal("final owner token remains")
 	}
 	if after := repositoryDigest(t, repository); after != beforeDigest {
 		t.Fatalf("origin digest changed: before=%s after=%s", beforeDigest, after)

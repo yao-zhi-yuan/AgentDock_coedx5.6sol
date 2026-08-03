@@ -26,10 +26,7 @@ const TestImage = "agentdock-sandbox:phase4"
 
 const sanitizedGitPointer = "gitdir: /agentdock/not-mounted\n"
 
-const (
-	containerCreateSettleWindow = 5 * time.Second
-	containerReinspectAttempts  = 5
-)
+const containerReinspectAttempts = 5
 
 type DockerConfig struct {
 	Image          string
@@ -772,7 +769,13 @@ func (sandbox *dockerSandbox) markContainerCreateUnknown(name string) {
 	if sandbox.uncertainContainers == nil {
 		sandbox.uncertainContainers = make(map[string]time.Time)
 	}
-	sandbox.uncertainContainers[name] = time.Now().Add(containerCreateSettleWindow)
+	if _, tracked := sandbox.uncertainContainers[name]; !tracked {
+		// The timestamp is diagnostic metadata for how long reconciliation has
+		// remained unresolved. It is never a deadline for releasing ownership:
+		// absence from one or more Docker snapshots does not prove that an
+		// in-flight daemon create cannot become visible later.
+		sandbox.uncertainContainers[name] = time.Now()
+	}
 }
 
 func prepareWorkspacePermissions(workspace string) error {
@@ -955,8 +958,11 @@ func (sandbox *dockerSandbox) removeTrackedContainer(name string) error {
 			return err
 		}
 		if !exists {
-			if settleUntil, uncertain := sandbox.uncertainContainers[name]; uncertain &&
-				time.Now().Before(settleUntil) {
+			if _, uncertain := sandbox.uncertainContainers[name]; uncertain {
+				// An outcome-unknown create has no safe absence proof in the Docker
+				// API. Keep its name, owner token, Sandbox and worktree pending until
+				// an owned immutable ID becomes visible and is removed. Repeated empty
+				// name/label snapshots remain explicit retryable failure in this MVP.
 				return ErrContainerOutcomeUnknown
 			}
 			delete(sandbox.containers, name)
@@ -1119,7 +1125,7 @@ func (sandbox *dockerSandbox) Destroy(_ context.Context) (resultErr error) {
 	defer sandbox.mu.Unlock()
 	defer func() {
 		if resultErr != nil && !sandbox.destroyed {
-			resultErr = errors.Join(resultErr, sandbox.recordDestroyFailed())
+			resultErr = errors.Join(resultErr, sandbox.recordDestroyFailed(resultErr))
 		}
 	}()
 	if sandbox.destroyed {
@@ -1201,12 +1207,16 @@ func (sandbox *dockerSandbox) forgetProviderOwnership() {
 	sandbox.provider.owners.Delete(sandbox.ownerToken)
 }
 
-func (sandbox *dockerSandbox) recordDestroyFailed() error {
+func (sandbox *dockerSandbox) recordDestroyFailed(cause error) error {
+	reason := "sandbox cleanup failed and may be retried"
+	if errors.Is(cause, ErrContainerOutcomeUnknown) {
+		reason = "Docker create outcome remains unknown; Sandbox owner and worktree retained for explicit retry"
+	}
 	if err := policy.RecordBounded(sandbox.config.Audit, policy.AuditEvent{
 		Kind:      policy.AuditSandboxDestroyFailed,
 		RunID:     sandbox.spec.RunID,
 		AttemptID: sandbox.spec.AttemptID,
-		Reason:    "sandbox cleanup failed and may be retried",
+		Reason:    reason,
 		ImageID:   sandbox.config.Image,
 		CPU:       sandbox.config.CPU,
 		Memory:    sandbox.config.Memory,

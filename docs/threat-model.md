@@ -138,11 +138,14 @@ idempotency and durable Receipt/Artifact evidence.
   sanitized `.git` pointer before returning. Pending ownership is recorded
   before worktree/container side effects; failed provisioning rollback returns
   a cleanup handle and remains visible to Provider `Cleanup`. An
-  outcome-unknown Docker create stays tracked through bounded re-inspection,
-  and Destroy scans by full owner token but re-validates exact phase/Run/Attempt
-  labels before any fallback removal. Docker Provider cleanup retains the
-  worktree while any owned container outcome remains unresolved. Acceptance
-  compares the source repository digest and Git status before and after.
+  outcome-unknown Docker create stays tracked through bounded re-inspection and
+  every later empty snapshot. Time passage, name `not found`, and an empty
+  owner-token scan do not prove absence; Destroy returns and audits an explicit
+  retryable failure while retaining owner/pending/worktree state. Destroy scans
+  by full owner token but re-validates exact phase/Run/Attempt labels before any
+  fallback removal. Docker Provider cleanup retains the worktree while any
+  owned container outcome remains unresolved. Acceptance compares the source
+  repository digest and Git status before and after.
 
 Residual risks remain: Docker Desktop/daemon and the shared kernel are trusted;
 disk exhaustion is not completely bounded; repositories without vendored or

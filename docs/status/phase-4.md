@@ -10,8 +10,12 @@
 - Phase-4 implementation commit:
   `9fbe37fbba9317cbba53bc17bdf85ff0e96639d3`
   (`feat: add docker sandbox and policy enforcement`)
-- Planned external-review remediation: one follow-up commit on top of
-  `9fbe37fbba9317cbba53bc17bdf85ff0e96639d3`; no amend or reset.
+- First external-review remediation commit:
+  `9cc0c54685336fa5241f0014a3e852e51f8014e8`
+  (`fix: retain sandbox cleanup ownership`)
+- Second external-review remediation candidate: this report and its staged
+  repair are one follow-up commit on top of
+  `9cc0c54685336fa5241f0014a3e852e51f8014e8`; no amend or reset.
 
 ## Scope
 
@@ -127,6 +131,138 @@ Gate remains **PENDING** until the frozen remediation increment and complete
 BASE→index reviews reach Critical 0 / Important 0, every required verification
 is rerun fresh, this report records those results, and the follow-up commit is
 created with a clean worktree.
+
+## Second external review and Gate reopening (2026-08-03)
+
+The external read-only re-review of
+`9cc0c54685336fa5241f0014a3e852e51f8014e8` returned **Ready No**, Critical 0 /
+Important 1 / Minor 0. The prior fresh Gate and internal Ready verdicts below
+are retained as historical evidence only and no longer release Gate 4.
+
+The Important finding was a later create/publication race: after the five-second
+settle deadline, `removeTrackedContainer` could delete outcome-unknown tracking
+after one name `not found`; an empty owner-token scan could then be followed by
+worktree/owner destruction, while the daemon published the container only after
+those observations. Empty Docker snapshots and worktree destruction are not an
+atomic terminal-state proof.
+
+New deterministic tests were written before the fix:
+
+- expired uncertain state, repeated name `not found`, empty owner-token scan,
+  then visibility only after the first Destroy;
+- a long-term truly absent outcome-unknown create retried twice.
+
+The focused red command exited 1: the first case returned nil and removed its
+worktree; the second reached workspace cleanup instead of retaining ownership.
+The implementation no longer treats elapsed time as an ownership deadline.
+Every not-found observation for an outcome-unknown name returns
+`ErrContainerOutcomeUnknown`; owner token, pending Sandbox, container name, and
+worktree remain. Destroy emits a reason-specific `sandbox_destroy_failed` event
+on every retry. When the immutable ID later appears, the next retry validates
+all ownership labels, removes it, then removes registration/directory/pending
+state while preserving the origin digest and Git status. The identical focused
+green command exited 0 (`1.693s`), and the Sandbox unit package exited 0
+(`0.913s`).
+
+For a create that truly never becomes visible, phase 4 deliberately remains
+pending and explicitly failing rather than guessing absence. This is
+retryable/observable through `DockerProvider.Cleanup`,
+`ErrContainerOutcomeUnknown`, repeated destroy-failure audit events, and the
+retained owner/pending state. There is no unsafe force-release API. The tradeoff
+is a possible retained pending Sandbox/worktree requiring operator diagnosis;
+this is an honest MVP limitation, not a silent success or production
+multi-tenant lifecycle claim.
+
+The implementation-task checks that follow were run against the repaired
+candidate. Gate 4 release nevertheless remains **PENDING** until the same
+external Gatekeeper re-reviews the follow-up commit; this report does not turn
+an internal review into external approval.
+
+## Second-review remediation final fresh verification (2026-08-03)
+
+All commands in this section used the repaired candidate and
+`GOCACHE=/private/tmp/agentdock-go-cache-phase4-review2-final`; no result from
+before the second external Ready No was reused. Docker/PostgreSQL commands were
+rerun with explicitly approved host access when the filesystem sandbox denied
+the Docker socket or localhost.
+
+The candidate was frozen before the independent reviews. The repair-increment
+review of `9cc0c54685336fa5241f0014a3e852e51f8014e8..index` returned Critical 0 /
+Important 0 / Minor 0, Ready Yes. The complete
+`8873984c85ed7244fc46b13ff0417df013a28385..index` review independently returned
+Critical 0 / Important 0 / Minor 0, Ready Yes and confirmed the phase-5
+boundary. A documentation-only refresh after the complete Gate is re-reviewed
+before commit; it does not change production code or test logic.
+
+### Focused repair and exact Phase-4 Gate
+
+| Command | Exit | Key evidence |
+|---|---:|---|
+| deterministic expired/late-visible plus long-term-missing focused tests | 0 | `1.693s`; first Destroy retained owner/pending/worktree after repeated empty observations; retry removed the late immutable ID; truly absent stayed explicitly pending and audited |
+| focused Docker lifecycle/ownership suite after image build | 0 | host rerun passed in `5.921s`; the preceding missing-image attempt was not accepted |
+| `go test -tags=integration -count=1 ./internal/sandbox/...` | 0 | focused freeze verification passed in `22.896s` |
+| `make sandbox-security-test` before freeze | 0 | pinned image rebuilt; complete security package passed in `20.103s` |
+| `go test ./internal/policy/... ./internal/tools/...` | 0 | Policy `0.590s`; Tools `1.080s` |
+| `go test -tags=integration ./internal/sandbox/...` | 0 | final exact Gate passed in `20.492s` |
+| `make sandbox-security-test` | 0 | final pinned-image security target passed in `19.694s` |
+| `git diff --check` and `git diff --cached --check` | 0 | working-tree and frozen-index whitespace checks clean |
+| first sandboxed `make demo-phase4` | 2 | Docker socket permission denied; rejected as Gate evidence |
+| approved host-context `make demo-phase4` | 0 | all five Tools exercised; sensitive host path rejected; network denied; patched tests passed; Destroy converged |
+
+The accepted demonstration recorded:
+
+```text
+origin_before digest=sha256:04167e14a3fa2521b6a138aaaf39e264439da230a54c5e00cee762e830071983 status=""
+host_sensitive_path_rejected error="unsafe repository path"
+network-request-denied
+origin_after  digest=sha256:04167e14a3fa2521b6a138aaaf39e264439da230a54c5e00cee762e830071983 status=""
+destroy_verified containers=0 worktree_removed=true origin_unchanged=true
+audit_artifact digest=sha256:c52893f4919658905ddc311e5391220fa3dc063b78f2feb6526a5f924b25ee6f size=6956 type=phase-4-audit-jsonl
+```
+
+### Phase-3 core Gate
+
+| Command | Exit | Key evidence |
+|---|---:|---|
+| `go test -tags=integration -count=1 ./internal/lease/... ./internal/controller/...` | 0 | Lease `2.469s`; Controller `9.882s` |
+| `go test -tags=chaos -count=1 ./internal/controller/...` | 0 | Controller Chaos passed in `43.222s` |
+| `go test -race -count=1 ./internal/...` | 0 | every internal package passed Race |
+| `make chaos-worker-kill` | 0 | `iterations=100 killed=100 succeeded=100 waiting_approval=0 artifact_present_at_kill=48` |
+| `make demo-phase3` | 0 | A token 1 killed; B token 2 takeover; stale A append rejected; final `Succeeded` |
+
+### Phase-2 and Phase-1 regression
+
+| Command | Exit | Key evidence |
+|---|---:|---|
+| `go test -tags=integration -count=1 ./internal/store/... ./internal/controller/...` | 0 | Store `7.971s`; Controller `9.970s` |
+| `go test -tags=integration -count=1 ./internal/migration/... ./cmd/agentdock/...` | 0 | Migration `1.375s`; CLI `1.681s` |
+| `go test -race -count=1 ./internal/store/... ./internal/controller/...` | 0 | Store `1.484s`; Controller `1.782s` |
+| `make test-rebuild-state` | 0 | Domain `0.591s`; PostgreSQL Store `4.979s` |
+| `make test-integration` | 0 | Store, Lease, Controller, Migration, and CLI passed |
+| exact Phase-1 six-test command, `-count=1 -v` | 0 | all reducer/Pause/failure/concurrency cases printed PASS |
+| three Phase-1 concurrent Pause tests, `-count=50` | 0 | all 50 repetitions passed |
+
+### Full repository, environment, and resource convergence
+
+| Command | Exit | Key evidence |
+|---|---:|---|
+| `go test -count=1 ./...` | 0 | every repository package, including configcheck, passed uncached |
+| `go test -race -count=1 ./...` | 0 | every repository package passed uncached under Race |
+| `make test` | 0 | full Go target passed |
+| `make test-race` | 0 | full Race target passed |
+| `make lint` | 0 | no diagnostics |
+| `go vet ./...` | 0 | no diagnostics |
+| `go mod verify` | 0 | `all modules verified` |
+| final `make migrate` | 0 | `migrations applied` |
+| `make doctor` | 0 | Go `1.26.5`, Docker, Compose `5.1.3`, default ports, YAML, and Compose model passed without altering unrelated containers |
+| `make demo-fake` | 0 | fake Run and pause/resume both converged to `Succeeded` |
+
+Final resource inspection found zero container carrying
+`agentdock.owner_token`, an empty default `agentdock-worktrees` temporary root,
+and only `/Users/bytedance/Documents/Agent` in `git worktree list`. The branch
+remained `codex/agentdock-verify`, the pre-commit HEAD remained
+`9cc0c54685336fa5241f0014a3e852e51f8014e8`, the construction plan had no diff,
+and there was no unstaged implementation change.
 
 ## Preflight and Gate-3 baseline
 
@@ -532,11 +668,13 @@ no construction-plan diff, and both cached and working-tree `diff --check`
 clean. The branch and pre-commit HEAD remained exactly
 `codex/agentdock-verify` and `8873984c85ed7244fc46b13ff0417df013a28385`.
 
-## External-review remediation final verification (2026-08-03)
+## Superseded first-remediation final verification (2026-08-03)
 
-Every result in this section was produced after the final remediation
+Every result in this section was produced after the first remediation
 production-code freeze and the third increment/full-range reviews reached
-Critical 0 / Important 0. Commands used
+Critical 0 / Important 0. The second external review later found the
+outcome-unknown publication race, so these results are not reused for the new
+candidate. Commands used
 `GOCACHE=/private/tmp/agentdock-go-cache-phase4-external-final`. PostgreSQL
 commands used the repository-local database URL with explicitly authorized
 host access; Docker commands used the same final index and freshly built image.
@@ -636,6 +774,11 @@ there was no unstaged implementation change, and both index/working-tree
   preempt a recorder already blocked in a local mutex, write, flush, or
   `fsync`. Audit errors remain fail-closed and are returned; the deadline is
   not a hard kernel-I/O timeout.
+- Docker exposes no atomic proof that an outcome-unknown create will never
+  become visible. Phase 4 therefore retains the Sandbox/worktree and returns an
+  audited retryable error indefinitely until an owned immutable ID is observed
+  and removed. This can retain local disk and requires operator diagnosis; no
+  force-release path is provided because it could orphan a later container.
 
 ## Independent internal review
 
@@ -655,8 +798,8 @@ The complete review also confirmed Phase-4/Phase-5 scope compliance and found
 no Eino/ReplayReasoner, real model, Verifier/Repair, OTel Replay, Kubernetes,
 UI, or MCP implementation.
 
-External-review remediation verdicts are independent fresh reads of the final
-frozen candidate, not the interrupted or earlier No reviews:
+First-remediation verdicts were independent fresh reads of that frozen
+candidate, but are superseded by the second external Ready No:
 
 | Review | Critical | Important | Minor | Ready |
 |---|---:|---:|---:|---|
@@ -668,12 +811,22 @@ premature Docker-Provider worktree cleanup issues documented above. They were
 fixed with deterministic red→green tests and then re-reviewed from the new
 frozen index; no failed review is counted as a pass.
 
+Second-review remediation verdicts for the repaired frozen candidate:
+
+| Review | Critical | Important | Minor | Ready |
+|---|---:|---:|---:|---|
+| `9cc0c54..index` late-publication repair increment | 0 | 0 | 0 | Yes |
+| `8873984..index` complete Phase-4 range | 0 | 0 | 0 | Yes |
+
+Both reviews explicitly checked that empty name inspection plus an empty owner
+scan cannot release outcome-unknown ownership, that a retry recognizes and
+removes a later immutable container ID, and that foreign/forged-label resources
+remain untouched.
+
 ## Gate 4
 
-**PASS, pending the mechanical follow-up commit check.** The external blank
-review's Important and all five Minor findings are closed. The final remediation
-increment and complete Phase-4 range both review at Critical 0 / Important 0 /
-Minor 0, and the complete fresh verification matrix passes. The only remaining
-steps are to review this status-only evidence update, create the follow-up
-commit on top of `9fbe37f`, and confirm branch/parent/clean worktree. No push
-occurred and Phase 5 remains unstarted.
+**PENDING EXTERNAL RE-REVIEW.** The implementation task's repaired candidate
+has deterministic red→green coverage, Critical 0 / Important 0 internal
+increment and complete-range reviews, and a fully fresh passing Gate matrix.
+The same external Gatekeeper must still inspect the follow-up commit before
+Gate 4 is released. No push occurred and Phase 5 remains unstarted.

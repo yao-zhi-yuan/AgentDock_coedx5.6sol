@@ -193,7 +193,11 @@ and never cleaned as if it belonged to the current Sandbox.
 An unresolved name after a transient inspect failure remains tracked for a
 bounded re-inspection and later Destroy retry. Docker create uses an independent
 bounded context because caller cancellation does not prove the daemon-side
-result. Destroy also scans by the full owner token, then re-validates phase,
+result. An empty name inspection plus an empty owner-token scan is not an
+absence proof, even after elapsed time: an outcome-unknown name retains the
+Sandbox owner, pending handle, and worktree, and Destroy returns an explicitly
+audited retryable error until an owned immutable ID becomes visible and is
+removed. Destroy also scans by the full owner token, then re-validates phase,
 Run, Attempt, and immutable container ID before removal; this recovers an owned
 late-visible container without touching a forged-scope or other-Provider
 container. Command completion is not audited as successful until

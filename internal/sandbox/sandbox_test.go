@@ -276,6 +276,69 @@ func TestLateDockerCreateRemainsOwnedUntilDestroySeesIt(t *testing.T) {
 	}
 }
 
+func TestLongTermMissingUnknownCreateRemainsExplicitlyPending(t *testing.T) {
+	workspace := t.TempDir()
+	recorder := policy.NewMemoryAuditRecorder()
+	provider := NewDockerProvider(DockerConfig{Audit: recorder})
+	ownerToken := "223344556677889900aabbccddeeff11"
+	worktree := &destroyTestWorktree{workspace: workspace}
+	sandbox := &dockerSandbox{
+		provider:            provider,
+		config:              DockerConfig{Audit: recorder},
+		spec:                Spec{RunID: "missing-unknown", AttemptID: "attempt-1"},
+		worktree:            worktree,
+		ownerToken:          ownerToken,
+		containers:          map[string]string{"unknown-create": ""},
+		uncertainContainers: map[string]time.Time{"unknown-create": time.Now().Add(-time.Hour)},
+		inspectContainerOverride: func(string) (string, bool, bool, error) {
+			return "", false, false, nil
+		},
+		scanOwnedContainersOverride: func() error { return nil },
+		cleanupWorkspaceOverride: func(context.Context) error {
+			t.Fatal("cleanupWorkspace ran before Docker create outcome was proven")
+			return nil
+		},
+	}
+	provider.owners.Store(ownerToken, sandbox.Scope())
+	provider.pending.Store(ownerToken, sandbox)
+
+	for retry := 1; retry <= 2; retry++ {
+		if err := sandbox.Destroy(context.Background()); !errors.Is(err, ErrContainerOutcomeUnknown) {
+			t.Fatalf("Destroy retry %d error = %v, want outcome unknown", retry, err)
+		}
+		if worktree.destroyCalls != 0 || len(sandbox.containers) != 1 {
+			t.Fatalf(
+				"retry %d released unresolved ownership: worktree_calls=%d containers=%#v",
+				retry,
+				worktree.destroyCalls,
+				sandbox.containers,
+			)
+		}
+		if _, ok := provider.pending.Load(ownerToken); !ok {
+			t.Fatalf("retry %d lost pending Sandbox", retry)
+		}
+		if _, ok := provider.owners.Load(ownerToken); !ok {
+			t.Fatalf("retry %d lost owner token", retry)
+		}
+	}
+	destroyFailures := 0
+	destroyed := 0
+	for _, event := range recorder.Events() {
+		switch event.Kind {
+		case policy.AuditSandboxDestroyFailed:
+			destroyFailures++
+			if !strings.Contains(event.Reason, "outcome remains unknown") {
+				t.Fatalf("unknown-outcome audit reason = %q", event.Reason)
+			}
+		case policy.AuditSandboxDestroyed:
+			destroyed++
+		}
+	}
+	if destroyFailures != 2 || destroyed != 0 {
+		t.Fatalf("destroy audit failures=%d destroyed=%d events=%#v", destroyFailures, destroyed, recorder.Events())
+	}
+}
+
 func TestDockerProviderCleanupRetainsWorktreeUntilContainersConverge(t *testing.T) {
 	workspace := filepath.Join(t.TempDir(), "owned-worktree")
 	if err := os.Mkdir(workspace, 0o700); err != nil {

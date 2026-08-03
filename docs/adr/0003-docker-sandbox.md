@@ -49,11 +49,16 @@ container. Removal errors remain tracked, are returned and audited, and can be
 retried by Destroy. Provider-owned pending worktree paths and Sandbox owner
 tokens are registered before their external side effects; failed rollback
 returns a cleanup handle and remains eligible for Provider `Cleanup`. Docker
-create uses an independent bounded context, retains an outcome-unknown name
-across initial not-found inspection, and Destroy scans the full owner token
-while re-validating all scope labels. Docker Provider cleanup never drains the
-underlying worktree Provider independently; the owning Sandbox removes its
-worktree only after container convergence. Once Destroy starts, execution stays
-disabled; a failed worktree removal re-sanitizes `.git` before returning. The
-production caller-environment allowlist is empty and Go control variables are
-fixed. Output uses one combined stdout/stderr budget.
+create uses an independent bounded context and retains an outcome-unknown name
+across every not-found inspection. Docker supplies no atomic create-absence
+receipt, so elapsed time plus empty name/owner-token snapshots never releases
+ownership. In this MVP, Destroy remains explicitly failed and retryable, emits
+`sandbox_destroy_failed`, and keeps the Sandbox/worktree pending until an owned
+immutable ID is observed and removed. There is deliberately no force-release
+API that could orphan a later-visible container. Destroy scans the full owner
+token while re-validating all scope labels. Docker Provider cleanup never
+drains the underlying worktree Provider independently; the owning Sandbox
+removes its worktree only after container convergence. Once Destroy starts,
+execution stays disabled; a failed worktree removal re-sanitizes `.git` before
+returning. The production caller-environment allowlist is empty and Go control
+variables are fixed. Output uses one combined stdout/stderr budget.
