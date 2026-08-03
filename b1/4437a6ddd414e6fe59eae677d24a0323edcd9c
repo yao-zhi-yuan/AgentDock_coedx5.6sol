@@ -1,0 +1,31 @@
+docs/adr/0003-docker-sandbox.md
+  s_acabfe08bec339::t_37a70beede5b82 52-64
+docs/architecture.md
+  s_acabfe08bec339::t_e12ef3c3ffd89b 196-200
+docs/threat-model.md
+  s_acabfe08bec339::t_cb7331ba93b1b5 141-148
+internal/sandbox/docker.go
+  s_acabfe08bec339::t_b60fe008fe0e61 29,772-778,961-965,1128,1210-1214,1219
+internal/sandbox/sandbox_test.go
+  s_acabfe08bec339::t_0a3f9dcdf8cc6e 279-341
+internal/sandbox/worktree_integration_test.go
+  s_acabfe08bec339::t_3da905fe1f0e4f 13-15,170-276
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "b14437a6ddd414e6fe59eae677d24a0323edcd9c",
+  "prompts": {},
+  "sessions": {
+    "s_acabfe08bec339": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fb71f-186d-7f70-8d23-57fdc31e367f",
+        "model": "unknown"
+      },
+      "human_author": "yaozhiyuan.123 <yaozhiyuan.123@bytedance.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
