@@ -1,0 +1,93 @@
+Makefile
+  s_5c63e00d6e3112::t_1cfa1317fb46f7 19,34-35,66-67
+cmd/agentdock/postgres_integration_test.go
+  s_5c63e00d6e3112::t_c0e6f939656b16 357,363
+cmd/eino-recorded-demo/main.go
+  s_5c63e00d6e3112::t_0659457c3785c9 1-246
+docs/adr/0004-eino-boundary.md
+  s_5c63e00d6e3112::t_e75fb050b87882 32-55
+docs/architecture.md
+  s_5c63e00d6e3112::t_67aed51c28d003 13,59-60,62-63,74,76,148-149,254
+docs/demo.md
+  s_5c63e00d6e3112::t_99a2d29b896e35 132-171
+docs/threat-model.md
+  s_5c63e00d6e3112::t_b513274d159685 5,41,45,50,154-190
+examples/buggy-go-service/go.mod
+  s_5c63e00d6e3112::t_6af5b33d96c990 1-3
+examples/buggy-go-service/internal/mathutil/divide.go
+  s_5c63e00d6e3112::t_28bb58806b59f2 1-6
+examples/buggy-go-service/internal/mathutil/divide_test.go
+  s_5c63e00d6e3112::t_40351ea80b7e0c 1-11
+examples/buggy-go-service/internal/user/name.go
+  s_5c63e00d6e3112::t_526adda2ef901c 1-8
+examples/buggy-go-service/internal/user/name_test.go
+  s_5c63e00d6e3112::t_ed3b506580dbf8 1-9
+examples/scenarios/phase5-divide-zero.yaml
+  s_5c63e00d6e3112::t_c5ef25cfead82f 1-30
+examples/scenarios/phase5-normalize-name.yaml
+  s_5c63e00d6e3112::t_33c9015186066c 1-30
+go.mod
+  s_5c63e00d6e3112::t_e6f37e60df5028 9,17-24,29-31,33-41,43-49,51,53
+go.sum
+  s_5c63e00d6e3112::t_015eacf4eee71c 1-25,27-30,32,34-63,66-74,85-100,103-135,137-141,143-151,157-161,164-182,184-187,191-199,202-209,213-217,219-220
+internal/controller/controller.go
+  s_5c63e00d6e3112::t_fcb23579031458 293-295,297
+internal/controller/controller_test.go
+  s_5c63e00d6e3112::t_89e86d3377cf37 513,521,523
+internal/controller/managed.go
+  s_5c63e00d6e3112::t_7c803008bfdb43 459-461,463
+internal/reasoner/architecture_test.go
+  s_5c63e00d6e3112::t_77eed353077ebe 1-72
+internal/reasoner/cassette_files_test.go
+  s_5c63e00d6e3112::t_e95ac33875eb5a 1-94
+internal/reasoner/eino/eino.go
+  s_5c63e00d6e3112::t_acc51a22274f2e 1-273
+internal/reasoner/eino/eino_integration_test.go
+  s_5c63e00d6e3112::t_461d13e39e253c 1-191
+internal/reasoner/eino/eino_test.go
+  s_5c63e00d6e3112::t_0f731b5cc2c236 1-87
+internal/reasoner/fake.go
+  s_5c63e00d6e3112::t_751b51aea6918b 8-9,11-15,19-26,29-33,35-54,58,61,64-79
+internal/reasoner/fake_test.go
+  s_5c63e00d6e3112::t_beb1312c7add43 14-16,33,36-41
+internal/reasoner/phase5_acceptance_test.go
+  s_5c63e00d6e3112::t_3c6a801319ce15 1-289
+internal/reasoner/provider_error.go
+  s_5c63e00d6e3112::t_b4881c3af47093 1-78
+internal/reasoner/provider_error_test.go
+  s_5c63e00d6e3112::t_0e0922ceb24c2e 1-41
+internal/reasoner/reasoner.go
+  s_5c63e00d6e3112::t_c8271d8f4d4c78 8-11,16-26,32-65,67-71,75-77,80-142,145-146,148-158,161-199,212-304
+internal/reasoner/replay.go
+  s_5c63e00d6e3112::t_f953c4c03d466a 1-181
+internal/reasoner/stream.go
+  s_5c63e00d6e3112::t_323a1de586b81e 1-247
+internal/tools/contract.go
+  s_5c63e00d6e3112::t_02d9e076c972ac 83,94,106-183
+internal/tools/contracts_test.go
+  s_5c63e00d6e3112::t_32afeb64d80708 55-81
+internal/tools/service.go
+  s_5c63e00d6e3112::t_bf725e43b73d74 55-68
+testdata/cassettes/phase5-divide-zero.json
+  s_5c63e00d6e3112::t_39f3a1d1ec669b 1-32
+testdata/cassettes/phase5-normalize-name.json
+  s_5c63e00d6e3112::t_f4d4a51d944205 1-32
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "88ff53e0ccbf0ee3abaf53fe561ee8862f47a7a6",
+  "prompts": {},
+  "sessions": {
+    "s_5c63e00d6e3112": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fc7d5-5041-7651-9db0-37ea23a5c2a1",
+        "model": "unknown"
+      },
+      "human_author": "yaozhiyuan.123 <yaozhiyuan.123@bytedance.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
