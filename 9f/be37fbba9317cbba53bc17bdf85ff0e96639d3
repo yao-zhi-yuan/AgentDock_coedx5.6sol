@@ -1,0 +1,77 @@
+.dockerignore
+  s_acabfe08bec339::t_78095e4feb9454 1-7
+Makefile
+  s_acabfe08bec339::t_5932de5a0c419f 8-9,15,19,30-32,34,57,68-75
+README.md
+  s_acabfe08bec339::t_0d0c76a6f5772c 5,28,53-56,63-65,92,94
+cmd/sandbox-demo/main.go
+  s_acabfe08bec339::t_1cd093f0e289de 1-263
+cmd/sandbox-helper/main.go
+  s_acabfe08bec339::t_f1de5eb5de6980 1-561
+configs/policy.yaml
+  s_aa448679b2d320::t_8c0f0f3321b6b3 1-51
+deployments/sandbox/Dockerfile
+  s_acabfe08bec339::t_78098cb8f4d634 1-8
+docs/adr/0003-docker-sandbox.md
+  s_acabfe08bec339::t_b9043f787b154c 30-52
+docs/architecture.md
+  s_acabfe08bec339::t_5c003a479dc058 13,46,63-64,144-148,151-220
+docs/demo.md
+  s_acabfe08bec339::t_017a8a11073cb7 83-130
+docs/threat-model.md
+  s_acabfe08bec339::t_4001e108ab1223 5,41-47,101-144
+internal/policy/audit.go
+  s_acabfe08bec339::t_4f4953698f1661 1-215
+internal/policy/path.go
+  s_acabfe08bec339::t_62e1a3f6bbd879 1-60
+internal/policy/policy.go
+  s_acabfe08bec339::t_29637e07c9cb6e 1-264
+internal/policy/policy_test.go
+  s_acabfe08bec339::t_fa233f6a777738 1-223
+internal/sandbox/docker.go
+  s_acabfe08bec339::t_0a9f3831fbbfc4 1-1166
+internal/sandbox/docker_integration_test.go
+  s_acabfe08bec339::t_c697d150703a8d 1-636
+internal/sandbox/sandbox.go
+  s_acabfe08bec339::t_3a7d63e6c95113 1-65
+internal/sandbox/sandbox_test.go
+  s_acabfe08bec339::t_19101ef7d7fad5 1-377
+internal/sandbox/test_helpers_integration_test.go
+  s_acabfe08bec339::t_2785a5ec867b83 1-58
+internal/sandbox/worktree.go
+  s_acabfe08bec339::t_5fab54e8d5e9e2 1-495
+internal/sandbox/worktree_integration_test.go
+  s_acabfe08bec339::t_2cdbecff55f97c 1-333
+internal/tools/contract.go
+  s_acabfe08bec339::t_508d873f7a3b92 1-406
+internal/tools/contracts_test.go
+  s_acabfe08bec339::t_6383b70b685d48 1-300
+internal/tools/service.go
+  s_acabfe08bec339::t_335984277c041d 1-329
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "9fbe37fbba9317cbba53bc17bdf85ff0e96639d3",
+  "prompts": {},
+  "sessions": {
+    "s_aa448679b2d320": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fb741-8db4-79c0-ae04-e161303922b7",
+        "model": "unknown"
+      },
+      "human_author": "yaozhiyuan.123 <yaozhiyuan.123@bytedance.com>"
+    },
+    "s_acabfe08bec339": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fb71f-186d-7f70-8d23-57fdc31e367f",
+        "model": "unknown"
+      },
+      "human_author": "yaozhiyuan.123 <yaozhiyuan.123@bytedance.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
