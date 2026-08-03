@@ -1,0 +1,51 @@
+version: v1
+default: deny
+
+environment:
+  allow: []
+
+rules:
+  - tool: repo.list
+    capability: repo:read
+    readOnly: true
+    paths:
+      - .
+    network: false
+    maxTimeout: 10s
+    maxOutputBytes: 262144
+
+  - tool: repo.read
+    capability: repo:read
+    readOnly: true
+    paths:
+      - .
+    network: false
+    maxTimeout: 10s
+    maxOutputBytes: 262144
+
+  - tool: repo.search
+    capability: repo:read
+    readOnly: true
+    paths:
+      - .
+    network: false
+    maxTimeout: 15s
+    maxOutputBytes: 524288
+
+  - tool: repo.apply_patch
+    capability: repo:write
+    readOnly: false
+    paths:
+      - .
+    network: false
+    maxTimeout: 15s
+    maxOutputBytes: 262144
+
+  - tool: repo.test
+    capability: repo:test
+    readOnly: false
+    paths:
+      - .
+    network: false
+    maxTimeout: 60s
+    maxOutputBytes: 1048576

@@ -80,3 +80,51 @@ planning, in-executor work, the post-action/pre-Receipt gap, and later actions.
 The harness requires at least one Artifact-present Kill window and verifies
 unique Receipt/Artifact accounting. It is a local MVP reliability test, not a
 production scheduler or strong isolation claim.
+
+## Phase 4 Sandbox and Policy demonstration
+
+The phase-4 demonstration is deterministic and requires no model credential:
+
+```bash
+make demo-phase4
+```
+
+It creates a temporary Git fixture repository and records its tracked-content
+digest plus `git status --porcelain=v1`. One Run/Attempt worktree is created,
+and all five caller-visible tools go through Contract validation, static YAML
+Policy, Docker Sandbox, and the JSONL audit recorder:
+
+```text
+repo.list
+repo.read
+repo.search
+repo.apply_patch
+repo.test
+```
+
+The patch changes only the detached worktree. An absolute `/etc/passwd` read is
+rejected before Docker I/O. `repo.test` runs a Go test inside the no-network
+container; that test makes a real TCP attempt and passes only when the request
+is denied. Destroy removes the container set and worktree. The command then
+requires the origin digest and Git status to match their before values and
+prints the retained audit-artifact path.
+
+The complete negative suite is:
+
+```bash
+make sandbox-security-test
+```
+
+It verifies traversal/absolute/symlink/TOCTOU rejection, case-insensitive
+runtime-path reservation, no host hook/filter execution, no network, timeout
+and cancellation kill, PID exhaustion, combined-output truncation audit,
+non-root UID, read-only/non-workspace filesystem, writable workspace, cgroup
+limits, fixed/credential-free environment, cryptographic container ownership,
+cross-Provider name-collision safety, retryable Destroy, and removal of owned
+containers/worktrees. It also exercises a real top-level atomic patch, a
+read-only `.git` pointer mount, case-aliased root rejection on case-insensitive
+filesystems, and a controlled missing-promisor-object fixture that proves no
+lazy-fetch helper executes. Cleanup failures are explicit on normal, non-zero,
+timeout, and cancellation paths; once Destroy starts, execution cannot resume.
+Docker remains a local MVP risk-reduction boundary, not strong multi-tenant
+isolation.

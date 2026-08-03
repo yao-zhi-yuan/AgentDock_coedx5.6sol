@@ -10,7 +10,7 @@ Prepare → Reason → Act → Verify → Repair → Verify → Complete
 
 The project differentiates itself through durable state, crash recovery, concurrency control, isolated execution, deterministic verification, replay, and evidence—not through a general workflow engine.
 
-This contract was frozen in phase 0. Phase 3 implements the domain reducer/decider, framework-neutral Reasoner seam and FakeReasoner, compatible memory and PostgreSQL Event Stores, transactional Run-version CAS, verified checkpoints, Worker registration, Run leases, heartbeat, monotonically increasing fencing tokens, durable Action Receipts, crash takeover, and a PostgreSQL-backed Worker CLI. Other components shown below remain planned for their assigned phases.
+This contract was frozen in phase 0. Phase 4 retains the domain reducer/decider, framework-neutral Reasoner seam and FakeReasoner, compatible memory and PostgreSQL Event Stores, transactional Run-version CAS, verified checkpoints, Worker registration, leases, heartbeat, fencing, durable Action Receipts, crash takeover, and Worker CLI. It now implements the Tool Contract/static Policy seam and disposable Docker worktree execution. Eino, verifier/repair, replay products, and telemetry remain assigned to later phases.
 
 ## Request-to-artifact path
 
@@ -43,7 +43,7 @@ The end-to-end path is:
 4. Reconcile loads events, reduces state, and decides at most one action.
 5. The worker appends `ActionPlanned` with a stable `action_id` before an external action.
 6. In phase 1, `FakeReasoner` returns the minimum framework-neutral result needed to complete a deterministic Run, including the minimal internal tool-call variant required by Gate 1's invalid-tool-call test. From phase 5, `EinoReasoner` and `ReplayReasoner` normalize provider/recorded streaming, tool-call, usage, finish, and error data into that internal contract; Eino-specific types stay inside the Eino adapter.
-7. A declared tool is checked against its contract and static policy, then executed in the disposable Docker worktree.
+7. A declared phase-4 tool is checked against its input JSON Schema, capability/path/network/budget policy, and environment allowlist; the sandbox then executes only the fixed helper surface in a disposable Docker worktree.
 8. The result and receipt are persisted, and any patch is complete and digest-addressed when its Artifact metadata is registered.
 9. Deterministic verifiers bind evidence to `run_id`, `attempt_id`, `workspace_digest`, `spec_hash`, and verifier version.
 10. Only verifier evidence permits the controller to append a terminal success event.
@@ -60,8 +60,8 @@ The end-to-end path is:
 | FakeReasoner | deterministic phase 1 reasoning for the pure state-machine demo | live models, Eino, streaming, replay |
 | EinoReasoner adapter | phase 5 ChatModel, message, tool-call, streaming, usage, and error adaptation | leases, persistence, policy, verification |
 | ReplayReasoner | phase 5 deterministic playback of normalized recorded reasoner results | live model calls and event-log replay |
-| Tool/policy layer | schemas, capabilities, paths, network and budgets | arbitrary host shell |
-| Sandbox | disposable worktree and constrained process execution | strong tenant isolation |
+| Tool/policy layer | five versioned contracts, input/output schemas, capabilities, paths, network, time/output budgets, and audit | arbitrary host shell or deciding Run success |
+| Sandbox | one Run/Attempt worktree, immutable image ID, constrained Docker process execution, output capture, and cleanup | strong tenant isolation or phase-3 lifecycle authority |
 | Verifier | deterministic pass/fail evidence | accepting an agent's self-report |
 | Artifact store | complete-at-registration evidence bytes, stable idempotent identity, and digest metadata | deciding success or preventing later file/metadata mutation |
 | Replay | state reconstruction and recorded dependency playback | silently ignoring divergence |
@@ -141,8 +141,82 @@ its output is dry-reduced and referenced Artifact metadata/bytes are re-hashed;
 the PostgreSQL Event Store repeats the byte check inside direct
 `ActionCompleted` append validation so bypassing Controller cannot bless
 changed evidence. Malformed or changed evidence enters `WaitingApproval`.
-Disposable worktrees and containers remain phase 4. Actions outside the frozen
+Phase 4 adds disposable worktrees and containers without changing this
+recovery interpretation. The Tool Service is an execution dependency behind a
+phase-3 `ActionExecutor`; it does not receive Event Store, Lease, or terminal
+state authority. Phase 5 may translate normalized Reasoner tool calls into
+this service, but phase 4 does not add that adapter. Actions outside the frozen
 MVP side-effect set are out of scope.
+
+## Phase 4 execution boundary
+
+One `Sandbox` is bound to one `run_id` and `attempt_id`. Provisioning uses
+`git worktree add --no-checkout --detach` below a private canonical temporary
+root. A scrubbed, non-interactive host Git process materializes the resolved
+commit with fixed `ls-tree`/`cat-file` operations; hooks, fsmonitor, replacement
+objects, lazy fetch, protocol-from-user, and checkout filters are disabled.
+Docker mounts only that worktree at `/workspace`; the source checkout is never
+mounted. Before mount, the linked-worktree `.git` pointer is replaced by a
+fixed non-host path and over-mounted read-only. This protects the pointer while
+the private worktree root remains non-sticky so UID 65532 can atomically
+replace top-level files. The pointer is restored only for bounded Destroy. The
+configured image tag is resolved to an immutable local SHA-256 image ID before
+execution.
+
+Every container uses:
+
+- a fixed numeric unprivileged UID/GID (`65532:65532`), with write bits added
+  only inside the disposable worktree;
+- `--read-only`, `--network none`, `--cap-drop ALL`, and
+  `no-new-privileges`;
+- CPU, memory, and PID cgroup limits;
+- a bounded command context followed by explicit container kill/remove;
+- one combined stdout-plus-stderr cap;
+- a fixed Go environment (`GOENV=off`, empty `GOFLAGS`) plus a production
+  caller-environment allowlist that is empty by default;
+- `--ipc none` and no caller-writable tmpfs; Go home, cache, and temp
+  directories live under `/workspace/.agentdock`.
+
+Each Sandbox has a cryptographically random owner token. Docker names include
+only a token prefix, while the full token, Run ID, Attempt ID, and phase are
+labels. Create, start, timeout kill, normal remove, failure cleanup, and
+Destroy resolve an immutable container ID and require all ownership labels to
+match before acting. A name collision or forged/mismatched label is rejected
+and never cleaned as if it belonged to the current Sandbox.
+An unresolved name after a transient inspect failure remains tracked for a
+later Destroy retry. Command completion is not audited as successful until
+owned-container removal succeeds, and cleanup failure is explicitly audited
+on success, non-zero exit, timeout, and cancellation paths. Destroy is a
+one-way state transition: Execute is denied once cleanup starts. If worktree
+removal fails after the real `.git` pointer is restored, the pointer is
+re-sanitized before the retryable failure is returned.
+
+The container command allowlist contains only `agentdock-sandbox-helper`.
+That helper provides list/read/search/exact-replacement/test plus internal
+security probes; external Tool callers can reach only the five registered Tool
+Contracts. `repo.test` constructs `go test` arguments from repository-relative
+package paths and does not accept `-exec`, `-toolexec`, output paths, or a
+shell string.
+Exact replacement requires the replacement text not to retain the old text,
+so replay after a successful patch is rejected as declared by the Contract.
+
+Path safety is two-layered. The host rejects absolute paths, lexical `..`, and
+existing symlink escape before policy evaluation; `.git` and `.agentdock` are
+reserved case-insensitively. Immediately before file I/O
+inside Docker, the helper opens `/workspace` with Go `os.Root`; its
+descriptor-relative methods prevent absolute/traversing symlinks and avoid the
+check-then-open race on supported Unix platforms. The security suite races a
+workspace symlink between an in-root file and `/etc/passwd` and requires that
+only the in-root bytes or a rejection can be observed.
+
+The Tool Service checks that every Invocation Run/Attempt exactly matches the
+Sandbox-bound scope before policy or execution. Policy audit records contract
+and policy versions, effective path/network/time/output decisions, and
+environment key names. Sandbox audit records the immutable image ID,
+CPU/memory/PID limits, effective timeout/output budget, exit state, timeout,
+cancellation, truncation, and cleanup. Values and command output are never
+copied into the JSONL audit artifact, and that artifact is not Verifier
+evidence.
 
 ## Execution semantics
 

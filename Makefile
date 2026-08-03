@@ -5,16 +5,18 @@ GOLANGCI_LINT_VERSION := v2.12.2
 COMPOSE_FILE := compose.yaml
 DOCTOR_ENV := .env.example
 DATABASE_URL ?= postgres://agentdock:agentdock_dev_only@127.0.0.1:55433/agentdock?sslmode=disable
+SANDBOX_IMAGE := agentdock-sandbox:phase4
+SANDBOX_DOCKERFILE := deployments/sandbox/Dockerfile
 
 .DEFAULT_GOAL := help
 
 .PHONY: help doctor compose-config \
 	lint test test-race test-integration test-chaos security-test \
-	migrate demo-fake demo-eino-recorded sandbox-security-test \
+	migrate demo-fake demo-eino-recorded sandbox-image sandbox-security-test demo-phase4 \
 	chaos-worker-kill demo-phase3 test-rebuild-state e2e-recorded e2e-replay e2e-live
 
 help:
-	@echo "AgentDock Verify — phase 3 lease, fencing, and crash recovery"
+	@echo "AgentDock Verify — phase 4 Docker sandbox, worktree, and policy"
 	@echo "  make doctor          Validate the development environment"
 	@echo "  make compose-config  Parse the pinned Docker Compose configuration"
 	@echo "  make lint            Run Go static analysis"
@@ -25,8 +27,11 @@ help:
 	@echo "  make test-rebuild-state Verify golden, 1000-event, and checkpoint rebuilds"
 	@echo "  make chaos-worker-kill Kill 100 Worker processes and verify takeover convergence"
 	@echo "  make demo-phase3     Demonstrate two-Worker kill/takeover/fencing recovery"
+	@echo "  make sandbox-image   Build the pinned phase-4 execution image"
+	@echo "  make sandbox-security-test Run Docker/worktree negative acceptance"
+	@echo "  make demo-phase4     Demonstrate isolated tools, denial, tests, and cleanup"
 	@echo "  make demo-fake       Demonstrate a fake Run and pause/resume"
-	@echo "  Phase 4+ targets remain intentionally unavailable"
+	@echo "  Phase 5+ targets remain intentionally unavailable"
 
 doctor:
 	@EXPECTED_GO_TOOLCHAIN="$(GO_TOOLCHAIN)" DOCTOR_ENV="$(DOCTOR_ENV)" COMPOSE_FILE="$(COMPOSE_FILE)" ./scripts/doctor.sh
@@ -49,8 +54,7 @@ test-integration:
 test-chaos:
 	@AGENTDOCK_DATABASE_URL="$(DATABASE_URL)" go test -tags=chaos -count=1 ./internal/controller/...
 
-security-test:
-	@./scripts/not-implemented.sh "security-test" "phase 4"
+security-test: sandbox-security-test
 
 migrate:
 	@go run ./cmd/migrate -database-url "$(DATABASE_URL)" -path migrations
@@ -61,8 +65,14 @@ demo-fake:
 demo-eino-recorded:
 	@./scripts/not-implemented.sh "demo-eino-recorded" "phase 5"
 
-sandbox-security-test:
-	@./scripts/not-implemented.sh "sandbox-security-test" "phase 4"
+sandbox-image:
+	@docker build --network none -t "$(SANDBOX_IMAGE)" -f "$(SANDBOX_DOCKERFILE)" .
+
+sandbox-security-test: sandbox-image
+	@go test -tags=integration -count=1 -v ./internal/sandbox/...
+
+demo-phase4: sandbox-image
+	@go run ./cmd/sandbox-demo -image "$(SANDBOX_IMAGE)"
 
 chaos-worker-kill:
 	@AGENTDOCK_DATABASE_URL="$(DATABASE_URL)" go test -tags=chaos -count=1 -v ./internal/controller -run TestWorkerKillChaos100Converges

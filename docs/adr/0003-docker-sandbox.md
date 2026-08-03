@@ -27,3 +27,26 @@ Docker shares the host kernel and depends on a privileged daemon. It reduces ris
 - Worktree lifecycle and mount/path validation require negative tests.
 - Image versions must be pinned for replay evidence.
 - Stronger tenant isolation is a future architectural replacement, not a phase 0 abstraction layer.
+
+## Phase 4 implementation note
+
+The phase-4 implementation resolves the configured helper image tag to an
+immutable local image ID and mounts only a detached Run/Attempt worktree at
+`/workspace`. The helper uses Go `os.Root` for descriptor-relative repository
+I/O, while the host layer applies lexical/path-policy checks. No caller-facing
+contract exposes the helper's security probes or a generic command.
+
+The worktree is registered with `--no-checkout`; a scrubbed fixed Git command
+surface materializes blobs without hooks, filters, replacement refs, lazy
+fetch, or inherited credentials. Its absolute `.git` pointer is sanitized
+and over-mounted read-only while mounted; the private root can therefore
+remain non-sticky for portable top-level atomic replacement. The pointer is
+restored only for Destroy. Containers carry a random
+per-Sandbox owner token plus phase/Run/Attempt labels, and lifecycle operations
+verify those labels and then address the immutable container ID. Name
+collisions or mismatched labels are rejected without deleting the foreign
+container. Removal errors remain tracked, are returned and audited, and can be
+retried by Destroy. Once Destroy starts, execution stays disabled; a failed
+worktree removal re-sanitizes `.git` before returning. The production
+caller-environment allowlist is empty and Go control variables are fixed.
+Output uses one combined stdout/stderr budget.

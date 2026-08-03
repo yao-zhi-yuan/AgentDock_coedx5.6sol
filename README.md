@@ -2,7 +2,7 @@
 
 AgentDock Verify is a managed runtime for Eino-based coding agents that is designed to make execution recoverable, sandboxed, deterministic to verify, and replayable.
 
-The five-week MVP is an engineering demonstration, not a claim of production-scale multi-tenancy or a strong security boundary. The repository is currently at **phase 3: Worker lease, fencing, and crash recovery**. It has a pure reducer/decider, PostgreSQL Event Log, transactional version CAS, verified checkpoints, Worker registration/heartbeat, TTL lease takeover, monotonically increasing fencing tokens, stable action IDs, durable Action Receipts, real Worker-process Kill chaos, and one normal/recovery Reconcile path. Sandboxing/worktrees/Tool Policy, real Eino integration, verifiers, repair resolution, replay products, and telemetry remain unimplemented.
+The five-week MVP is an engineering demonstration, not a claim of production-scale multi-tenancy or a strong security boundary. The repository is currently at **phase 4: Docker sandbox, disposable Git worktrees, Tool Contract, and static Policy**. It retains phase 3's pure reducer/decider, PostgreSQL Event Log, Worker lease/fencing, durable Action Receipts, and crash recovery, and adds an attempt-scoped no-checkout worktree, a non-root/read-only/no-network Docker execution layer, bounded resources/time/combined output, an empty-by-default caller environment allowlist, scope-bound container ownership, five declared repository tools, default-deny YAML policy, and JSONL audit artifacts. Eino/ReplayReasoner, real model use, verifier/repair, product replay, telemetry, Kubernetes, UI, and MCP remain unimplemented.
 
 The project contract and sole construction plan is [`AgentDock-Verify-施工计划.md`](AgentDock-Verify-施工计划.md). The frozen five-week scope is restated in [`docs/scope.md`](docs/scope.md).
 
@@ -25,7 +25,7 @@ flowchart LR
 
 Phase 1 defined the minimal framework-neutral Reasoner seam and `FakeReasoner`; Controller depends only on that seam. Phase 2 made PostgreSQL events authoritative. Phase 3 adds leased workers and Receipt-guided recovery without changing the reducer/decision ownership boundary. Phase 5 adds `EinoReasoner`, `ReplayReasoner`, and streaming/tool/usage/finish/error normalization behind the seam. Eino types never cross into Controller.
 
-## Phase 3 check
+## Phase 4 check
 
 Prerequisites:
 
@@ -50,13 +50,19 @@ go test -tags=integration ./internal/lease/... ./internal/controller/...
 go test -tags=chaos ./internal/controller/...
 make chaos-worker-kill
 make demo-phase3
+go test ./internal/policy/... ./internal/tools/...
+go test -tags=integration ./internal/sandbox/...
+make sandbox-security-test
+make demo-phase4
 make demo-fake
 git diff --check
 ```
 
 `make demo-fake` keeps the fast memory-backed deterministic path. `make test-integration` exercises PostgreSQL transaction rollback, version competition, idempotency, reconnect, checkpoints, Artifacts, migration atomicity, and fresh-process Controller recovery. `make doctor` validates the pinned Go toolchain, Docker daemon, Compose, configured ports, required example parameters, YAML syntax, and the Compose model. A busy configured port is accepted only when the expected service in this Compose project publishes that exact host/container-port mapping.
 
-The sample values in `.env.example` are local-only defaults, not production credentials. Live model credentials are not required in phase 3 and will never be a default CI dependency.
+`make sandbox-security-test` builds the helper image from a digest-pinned Go base and then runs real Docker/worktree negative acceptance. `make demo-phase4` creates a local fixture repository, records its digest and Git status, invokes all five tools through contract/schema/policy/audit, applies a worktree-only patch, rejects `/etc/passwd`, runs a test that attempts network access, destroys the sandbox, and proves the fixture origin is unchanged. It requires no model credential.
+
+The sample values in `.env.example` are local-only defaults, not production credentials. Live model credentials are not required in phase 4 and will never be a default CI dependency.
 
 ## Durable CLI
 
@@ -83,9 +89,9 @@ so one action cannot be split across the legacy and managed event models.
 
 ## Consistency and security claims
 
-This phase does not claim exactly-once. PostgreSQL makes Event append, Run version, and fencing validation atomic, while an external action still cannot share that transaction. The implemented claim is at-least-once plus scoped idempotency and fencing. An unsafe ambiguous outcome enters `WaitingApproval`.
+This phase does not claim exactly-once. PostgreSQL makes Event append, Run version, and fencing validation atomic, while an external action still cannot share that transaction. The implemented claim remains at-least-once plus scoped idempotency and fencing. An unsafe ambiguous outcome enters `WaitingApproval`.
 
-Docker reduces accidental and common hostile access, but a container shares the host kernel and is not a strong multi-tenant isolation boundary. The MVP must run untrusted code only on a dedicated development machine or disposable runner appropriate for the risk.
+The only phase-4 tool names are `repo.list`, `repo.read`, `repo.search`, `repo.apply_patch`, and `repo.test`. Each call must pass input/output Schema validation, capability/path/network/budget policy, and audit. There is no host-shell tool. Docker reduces accidental and common hostile access, but a container shares the host kernel and is not a strong multi-tenant isolation boundary. The MVP must run untrusted code only on a dedicated development machine or disposable runner appropriate for the risk.
 
 See:
 

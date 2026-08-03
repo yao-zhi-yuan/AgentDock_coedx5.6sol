@@ -2,7 +2,7 @@
 
 ## Scope and current status
 
-This threat model covers the five-week local MVP through phase 3. Runtime controls not yet implemented remain described as planned.
+This threat model covers the five-week local MVP through phase 4. Controls assigned to later phases remain described as planned.
 
 The MVP is not a multi-tenant service and must not be presented as one.
 
@@ -38,13 +38,13 @@ The model output, target repository, generated patch, tool arguments, and sandbo
 
 | Threat | Planned control | Residual risk |
 |---|---|---|
-| Prompt/tool injection | fixed tool contracts, JSON schemas, capability and path policy | semantic manipulation within allowed operations |
-| Path traversal | canonical paths, allowlists, symlink escape checks | filesystem/kernel implementation flaws |
-| Host modification | disposable Git worktree, no arbitrary host shell | Docker daemon and bind-mount configuration remain privileged |
-| Network exfiltration | `network=none` by default, explicit egress policy later | host-side model call still leaves the machine |
-| Credential leakage | environment allowlist, redaction, no secrets in events/traces/cassettes | provider or operator misconfiguration |
-| Container breakout | non-root user, read-only root, dropped capabilities, resource limits | shared kernel means breakout cannot be ruled out |
-| Denial of service | CPU/memory/PID/time/output limits and cleanup | disk pressure or Docker daemon impact |
+| Prompt/tool injection | **Implemented in phase 4:** five fixed contracts, input/output JSON Schema, capability/path/network/budget policy | semantic manipulation within allowed operations |
+| Path traversal | **Implemented in phase 4:** lexical normalization, allowlists, host symlink checks, container-side `os.Root` I/O | filesystem/kernel implementation flaws |
+| Host modification | **Implemented in phase 4:** no-checkout worktree, hook/filter-free fixed Git materialization, sanitized worktree pointer, source checkout not mounted, no host-shell tool | trusted host Git and Docker daemon still read repository objects and manage the bind mount |
+| Network exfiltration | **Implemented in phase 4:** `network=none`; no network-enabled Tool Contract | host-side future model call still leaves the machine |
+| Credential leakage | **Implemented in phase 4 execution:** scrubbed host Git environment, lazy fetch disabled, empty production caller-environment allowlist, fixed Go environment, audit of key names only | image/operator/provider misconfiguration |
+| Container breakout | **Implemented in phase 4:** non-root, read-only root, dropped capabilities, no-new-privileges, bounded resources | shared kernel means breakout cannot be ruled out |
+| Denial of service | **Implemented in phase 4:** CPU/memory/PID/time/output limits plus kill/remove and worktree cleanup | disk pressure or Docker daemon impact |
 | Stale or identity-less execution writes | **Implemented in phase 3:** durable Lease-row mode, PostgreSQL owner/token/expiry checks, legacy-event rejection, and reducer mixed-path defense | non-database side effect must still be scoped-idempotent/receipted |
 | Forged verifier success | verifier identity/role and digest-bound evidence | compromised verifier worker or store |
 | Replay disclosure | redacted immutable cassettes, credential scanning | prompts or repository text may still be sensitive |
@@ -98,3 +98,47 @@ Each later phase must update this document with implemented controls and test ev
 These controls do not prevent a stale process from consuming CPU or performing
 a non-database side effect. Safety still depends on the action's scoped
 idempotency and durable Receipt/Artifact evidence.
+
+## Phase 4 sandbox and Tool controls
+
+- The source checkout is used only as the Git worktree owner and object source.
+  Each Run/Attempt gets a private detached `--no-checkout` worktree. Fixed
+  `ls-tree`/`cat-file` materialization disables hooks, checkout filters,
+  fsmonitor, replacement objects, lazy fetch, interactive protocol use, and
+  inherited host credentials. Docker mounts only that directory, with its
+  absolute `.git` pointer replaced by a fixed non-host path and over-mounted
+  read-only. The private parent root protects the non-sticky disposable
+  directory needed for top-level atomic patch replacement.
+- Docker resolves the configured sandbox image to a local immutable image ID,
+  runs with a numeric non-root user, read-only RootFS, no network, no
+  capabilities, `no-new-privileges`, and CPU/memory/PID limits.
+- The only caller-visible Tool Contracts are `repo.list`, `repo.read`,
+  `repo.search`, `repo.apply_patch`, and `repo.test`. No Tool accepts a host
+  executable or shell string.
+- Host path normalization rejects absolute paths and `..` before policy. The
+  container helper repeats access through `os.Root`; the negative suite covers
+  absolute paths, traversal, fixed symlink escape, and a concurrent symlink
+  replacement probe.
+- The committed caller-environment allowlist is empty. Go control variables
+  are fixed (`GOENV=off`, empty `GOFLAGS`) and cannot be overridden. Audit
+  events contain key names, contract/policy versions, decisions, effective
+  limits, immutable image ID, exit state, and counts, never values or command
+  output.
+- Allow, deny, completion/failure, timeout, truncation, and Destroy facts are
+  written to the phase-4 JSONL audit artifact. They are operational evidence,
+  not `VerificationPassed` or any phase-6 Verifier result.
+- A cryptographic per-Sandbox owner token plus exact phase/Run/Attempt labels
+  gates create/start/kill/remove/failure cleanup/Destroy; operations use the
+  immutable container ID after creation. Foreign name collisions and forged
+  or scope-mismatched labels are never removed. Timeout/cancellation kills and
+  removes the owned container. Destroy is retryable, audits both failure and
+  success, fixes permissions with an owned cleanup container, disables further
+  Execute calls as soon as cleanup starts, and removes the temporary worktree
+  without global `git worktree prune`. A failed worktree removal restores the
+  sanitized `.git` pointer before returning. Acceptance compares the source
+  repository digest and Git status before and after.
+
+Residual risks remain: Docker Desktop/daemon and the shared kernel are trusted;
+disk exhaustion is not completely bounded; repositories without vendored or
+image-preloaded modules can fail `go test` because network is deliberately
+disabled; and a malicious kernel or daemon can defeat these controls.
